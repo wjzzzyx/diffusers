@@ -59,6 +59,7 @@ lightning:
     checkpoint_callback:
       params:
         monitor: "val/loss_rec"
+        save_top_k: 3
 
   trainer:
     accelerator: gpu

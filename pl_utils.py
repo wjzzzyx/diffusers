@@ -319,34 +319,6 @@ def get_logger(opt, lightning_config):
     return instantiate_from_config(logger_cfg)
 
 
-def get_modelckpt_cfg(opt, lightning_config):
-    # modelcheckpoint - use TrainResult/EvalResult(checkpoint_on=metric) to
-    # specify which metric is used to determine best models
-    default_modelckpt_cfg = {
-        "target": "pytorch_lightning.callbacks.ModelCheckpoint",
-        "params": {
-            "dirpath": opt.ckptdir,
-            "filename": "{epoch:06}",
-            "verbose": True,
-            "save_last": True,
-        }
-    }
-    # if 'monitor' in lightning_config:
-    #     print(f"Monitoring {opt.monitor} as checkpoint metric.")
-    #     default_modelckpt_cfg["params"]["monitor"] = opt.monitor
-    #     default_modelckpt_cfg["params"]["save_top_k"] = 3
-
-    if "checkpoint_callback" in lightning_config.callbacks:
-        modelckpt_cfg = lightning_config.callbacks.checkpoint_callback
-    else:
-        modelckpt_cfg =  OmegaConf.create()
-    modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
-    print(f"Merged modelckpt-cfg: \n{modelckpt_cfg}")
-    # if version.parse(pl.__version__) < version.parse('1.4.0'):
-    #     trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
-    return modelckpt_cfg
-
-
 def get_callbacks(args, config, lightning_config):
     # add callback which sets up log directory
     default_callbacks_cfg = {
@@ -380,7 +352,15 @@ def get_callbacks(args, config, lightning_config):
         "cuda_callback": {
             "target": "pl_utils.CUDACallback"
         },
-        "checkpoint_callback": get_modelckpt_cfg(args, lightning_config)
+        "checkpoint_callback": {
+            "target": "pytorch_lightning.callbacks.ModelCheckpoint",
+            "params": {
+                "dirpath": args.ckptdir,
+                "filename": "{epoch:06}",
+                "verbose": True,
+                "save_last": True,
+            }
+        }
     }
 
     if "callbacks" in lightning_config:
