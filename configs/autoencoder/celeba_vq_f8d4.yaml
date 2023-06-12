@@ -1,0 +1,69 @@
+exp_name: debug_vqvae
+
+model:
+  seed: 23
+  base_learning_rate: 4.5e-6
+  scale_lr: True
+  target: diffusers.model.autoencoder.vqvae.PLVQVAE
+  params:
+    model_config:
+      logvar_init: 0.0
+      autoencoder:
+        n_embed: 8192
+        z_channels: 4
+        resolution: 128
+        in_channels: 3
+        out_ch: 3
+        ch: 128
+        ch_mult: [ 1,2,4,4 ]  # num_down = len(ch_mult)-1
+        num_res_blocks: 2
+        attn_resolutions: [ ]
+        dropout: 0.0
+      discriminator:
+        input_nc: 3
+        n_layers: 3
+        use_actnorm: False
+      loss:
+        loss_recon_type: l1
+        weight_perceptual: 1.0
+        weight_vq: 0.000001
+        weight_gan: 0.5
+        gan_start_step: 50001
+
+data:
+  target: pl_utils.DataModuleFromConfig
+  params:
+    batch_size: 8
+    wrap: False
+    train:
+      target: diffusers.data.celeba.CelebA
+      params:
+        data_dir: /mnt/data1/yixiao/CelebA/
+        selected_attrs: ['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Male', 'Young']
+        mode: train
+    validation:
+      target: diffusers.data.celeba.CelebA
+      params:
+        data_dir: /mnt/data1/yixiao/CelebA/
+        selected_attrs: ['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Male', 'Young']
+        mode: val
+
+lightning:
+  callbacks:
+    image_logger:
+      target: pl_utils.ImageLogger
+      params:
+        batch_frequency: 5000
+        max_images: 8
+        increase_log_steps: True
+    checkpoint_callback:
+      params:
+        monitor: "val/loss_rec"
+        save_top_k: 3
+
+  trainer:
+    accelerator: gpu
+    devices: 1
+    benchmark: True
+    accumulate_grad_batches: 1
+    max_epochs: 100

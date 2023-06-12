@@ -215,7 +215,7 @@ class Encoder(nn.Module):
         self, *,
         in_channels, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
         attn_resolutions, dropout=0.0, resamp_with_conv=True,
-        resolution, z_channels, double_z=True, use_linear_attn=False, attn_type="vanilla",
+        resolution, z_channels, double_z=False, use_linear_attn=False, attn_type="vanilla",
         **ignore_kwargs
     ):
         """
