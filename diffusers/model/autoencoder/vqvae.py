@@ -296,6 +296,8 @@ class PLVQVAE(pl.LightningModule):
         # TODO EMA validation?
         loss_ae, logdict_ae = self.model(batch['image'], 0, self.global_step)
         loss_disc, logdict_disc = self.model(batch['image'], 1, self.global_step)
+        log_dict_ae = {f'val/{k}': v for k, v in log_dict_ae.items()}
+        log_dict_disc = {f'val/{k}': v for k, v in log_dict_disc.items()}
         self.log_dict(logdict_ae)
         self.log_dict(logdict_disc)
     
