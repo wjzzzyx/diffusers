@@ -101,7 +101,7 @@ class AutoEncoderWithDisc(nn.Module):
                     'd_weight': lw_gan_adap.detach(),
                 })
             
-            log_dict['loss_total'] = loss.clone().detach().mean(),
+            log_dict['loss_total'] = loss.clone().detach().mean()
             return loss, log_dict
         
         if optimizer_idx == 1:    # train discriminator
