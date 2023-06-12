@@ -281,7 +281,7 @@ class PLVQVAE(pl.LightningModule):
             optimizer_g.step()
             self.untoggle_optimizer(optimizer_g)
 
-            self.log_dict(logdict, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+            self.log_dict(logdict, prog_bar=False, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
         
         else:
             self.toggle_optimizer(optimizer_d)
@@ -290,7 +290,7 @@ class PLVQVAE(pl.LightningModule):
             optimizer_d.step()
             self.untoggle_optimizer(optimizer_d)
 
-            self.log_dict(logdict, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+            self.log_dict(logdict, prog_bar=False, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
         
     def validation_step(self, batch, batch_idx):
         # TODO EMA validation?
@@ -298,8 +298,8 @@ class PLVQVAE(pl.LightningModule):
         loss_disc, logdict_disc = self.model(batch['image'], 1, self.global_step)
         log_dict_ae = {f'val/{k}': v for k, v in log_dict_ae.items()}
         log_dict_disc = {f'val/{k}': v for k, v in log_dict_disc.items()}
-        self.log_dict(logdict_ae)
-        self.log_dict(logdict_disc)
+        self.log_dict(logdict_ae, batch_size=batch['image'].size(0))
+        self.log_dict(logdict_disc, batch_size=batch['image'].size(0))
     
     def configure_optimizers(self,):
         lr = self.config.learning_rate

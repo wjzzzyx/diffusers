@@ -180,8 +180,8 @@ class PLAutoEncoderWithDisc(pl.LightningModule):
             optimizer_g.step()
             self.untoggle_optimizer(optimizer_g)
 
-            self.log('aeloss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log_dict(log_dict, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            self.log('aeloss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
+            self.log_dict(log_dict, prog_bar=False, logger=True, on_step=True, on_epoch=False, batch_size=batch['image'].size(0))
         
         else:
             self.toggle_optimizer(optimizer_d)
@@ -190,17 +190,17 @@ class PLAutoEncoderWithDisc(pl.LightningModule):
             optimizer_d.step()
             self.untoggle_optimizer(optimizer_d)
 
-            self.log('discloss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log_dict(log_dict, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            self.log('discloss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
+            self.log_dict(log_dict, prog_bar=False, logger=True, on_step=True, on_epoch=False,batch_size=batch['image'].size(0))
     
     def validation_step(self, batch, batch_idx):
         loss_ae, log_dict_ae = self.model(batch['image'], 0, self.global_step, sample_posterior=True)
         loss_disc, log_dict_disc = self.model(batch['image'], 1, self.global_step, sample_posterior=True)
         log_dict_ae = {f'val/{k}': v for k, v in log_dict_ae.items()}
         log_dict_disc = {f'val/{k}': v for k, v in log_dict_disc.items()}
-        self.log('val/loss_rec', log_dict_ae['val/loss_rec'])
-        self.log_dict(log_dict_ae)
-        self.log_dict(log_dict_disc)
+        self.log('val/loss_rec', log_dict_ae['val/loss_rec'], batch_size=batch['image'].size(0))
+        self.log_dict(log_dict_ae, batch_size=batch['image'].size(0))
+        self.log_dict(log_dict_disc, batch_size=batch['image'].size(0))
     
     def configure_optimizers(self,):
         # TODO logvar is not optimized?
