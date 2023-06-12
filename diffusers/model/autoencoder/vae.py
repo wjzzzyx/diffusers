@@ -51,8 +51,7 @@ class AutoEncoderWithDisc(nn.Module):
         self.lw_perceptual = model_config.loss.weight_perceptual
         self.lw_kl = model_config.loss.weight_kl
         self.lw_gan = model_config.loss.weight_gan
-        self.discriminator_iter_start = model_config.loss.gan_start_step
-        self.disc_factor = model_config.loss.disc_factor
+        self.gan_start_step = model_config.loss.gan_start_step
         self.ae = AutoEncoderKL(model_config.autoencoder)
         self.discriminator = NLayerDiscriminator(**model_config.discriminator).apply(weights_init)
         self.perceptual_loss = LPIPS().eval()
@@ -61,56 +60,56 @@ class AutoEncoderWithDisc(nn.Module):
     def forward(self, x, optimizer_idx, global_step, sample_posterior=True):
         # TODO make it more efficient by specifying run what parts
         recon, posterior = self.ae(x, sample_posterior)
-        # reconstruction loss
-        loss_rec = torch.abs(x - recon)
-        # perceptual loss
-        if self.lw_perceptual > 0:
-            loss_per = self.perceptual_loss(x, recon)
-            loss_rec = loss_rec + self.lw_perceptual * loss_per
-        # nll loss of Laplacian distribution P(X|Z)?
-        loss_nll = loss_rec / torch.exp(self.logvar) + self.logvar
-        # No weights are used
-        loss_nll_weighted = loss_nll
-        loss_nll = torch.sum(loss_nll) / loss_nll.size(0)
-        loss_nll_weighted = torch.sum(loss_nll_weighted) / loss_nll_weighted.size(0)
-        # prior loss
-        loss_kl = posterior.kl()
-        loss_kl = torch.sum(loss_kl) / loss_kl.size(0)
 
-        # GAN loss
-        if optimizer_idx == 0:
-            logits_fake = self.discriminator(recon)
-            loss_g = -torch.mean(logits_fake)
-            if self.training and self.disc_factor > 0:
-                d_weight = self.calculate_adaptive_weight(loss_nll, loss_g)
-            else:
-                d_weight = torch.tensor(0.0)
-            
-            # TODO move the global_step to higher capsulation
-            disc_factor = 0.0 if global_step < self.discriminator_iter_start else self.disc_factor
+        if optimizer_idx == 0:    # train generator
+            # reconstruction loss
+            loss_rec = torch.abs(x - recon)
+            # perceptual loss
+            if self.lw_perceptual > 0:
+                loss_per = self.perceptual_loss(x, recon)
+                loss_rec = loss_rec + self.lw_perceptual * loss_per
+            # nll loss of Laplacian distribution P(X|Z)?
+            loss_nll = loss_rec / torch.exp(self.logvar) + self.logvar
+            # No weights are used
+            loss_nll_weighted = loss_nll
+            loss_nll = torch.sum(loss_nll) / loss_nll.size(0)
+            loss_nll_weighted = torch.sum(loss_nll_weighted) / loss_nll_weighted.size(0)
+            # prior loss
+            loss_kl = posterior.kl()
+            loss_kl = torch.sum(loss_kl) / loss_kl.size(0)
 
-            loss = loss_nll_weighted + self.lw_kl * loss_kl + self.lw_gan * d_weight * disc_factor * loss_g
-
+            loss = loss_nll_weighted + self.lw_kl * loss_kl
             log_dict = {
-                'loss_total': loss.clone().detach().mean(),
                 'loss_nll': loss_nll.detach().mean(),
                 'loss_rec': loss_rec.detach().mean(),
                 'loss_kl': loss_kl.detach().mean(),
-                'loss_g': loss_g.detach().mean(),
                 'logvar': self.logvar.detach(),
-                'd_weight': d_weight.detach(),
-                'disc_factor': torch.tensor(disc_factor),
             }
+
+            # GAN loss
+            if global_step >= self.gan_start_step:
+                logits_fake = self.discriminator(recon)
+                loss_g = -torch.mean(logits_fake)
+                if self.training:
+                    lw_gan_adap = self.calculate_adaptive_weight(loss_nll, loss_g)
+                else:
+                    lw_gan_adap = torch.tensor(0.0)
+
+                loss += self.lw_gan * lw_gan_adap * loss_g
+                log_dict.update({
+                    'loss_g': loss_g.detach().mean(),
+                    'd_weight': lw_gan_adap.detach(),
+                })
+            
+            log_dict['loss_total'] = loss.clone().detach().mean(),
             return loss, log_dict
         
-        if optimizer_idx == 1:
+        if optimizer_idx == 1:    # train discriminator
             logits_real = self.discriminator(x.detach())
             logits_fake = self.discriminator(recon.detach())
             loss_d = self.hinge_d_loss(logits_real, logits_fake)
 
-            disc_factor = 0.0 if global_step < self.discriminator_iter_start else self.disc_factor
-
-            loss = disc_factor * loss_d
+            loss = loss_d
 
             log_dict = {
                 'loss_d': loss_d.clone().detach().mean(),
@@ -165,9 +164,10 @@ class PLAutoEncoderWithDisc(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         # Should we train the generator and discriminator at different steps?
-        if self.global_step % 2 == 0:
+        if self.global_step >= self.config.loss.gan_start_step \
+            and self.global_step % 2 == 1:    # train discriminator
             optimizer_idx = 1
-        else:
+        else:    # train generator
             optimizer_idx = 0
         optimizer_g, optimizer_d = self.optimizers(use_pl_optimizer=True)
         loss, log_dict = self.model(batch['image'], optimizer_idx, self.global_step, sample_posterior=True)
