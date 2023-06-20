@@ -1,0 +1,39 @@
+exp_name: debug
+
+model:
+  seed: 23
+  base_learning_rate: 4.5e-6
+  scale_lr: True
+  target: diffusers.model.diffusion.ddpm.DDPM
+  params:
+    model_config:
+      parameterization: 'eps'
+      learn_logvar: False
+      logvar_init: 0.
+      unet:
+        target: diffusers.model.diffusion.unet.UNetModel
+        params:
+          image_size: 
+          in_channels: 
+          out_channels:
+          model_channels: 224
+          channel_mult: [1, 2, 3, 4]
+          num_res_blocks: 2
+          attention_resolutions: [2, 4, 8]
+          num_head_channels: 32
+      loss:
+        type: l2
+        lw_simple: 1.
+        lw_elbo: 0.
+    schedule_config:
+      type: 
+      linear_start: 0.0015
+      linear_end: 0.0195
+      cosine_s: 8.0e-3
+      num_timesteps: 1000
+      v_posterior: 0.
+    sampler_config:
+      target: diffusers.model.diffusion.samplers.VanillaSampler
+      params:
+        clip_denoised: True
+    use_ema: True
