@@ -1,0 +1,79 @@
+exp_name: cifar10_ddpm_bs64_e50
+
+model:
+  seed: 23
+  base_learning_rate: 4.5e-6
+  scale_lr: True
+  target: diffusers.model.diffusion.ddpm.PLDDPM
+  params:
+    model_config:
+      parameterization: 'eps'
+      learn_logvar: False
+      logvar_init: 0.
+      unet:
+        target: diffusers.model.diffusion.unet.UNetModel
+        params:
+          image_size: 32
+          in_channels: 3
+          out_channels: 3
+          model_channels: 64
+          channel_mult: [1, 2, 3, 4]
+          num_res_blocks: 2
+          attention_resolutions: [2, 4, 8]
+          num_head_channels: 32
+      loss:
+        type: l2
+        lw_simple: 1.
+        lw_elbo: 0.
+    schedule_config:
+      type: linear
+      linear_start: 0.0015
+      linear_end: 0.0195
+      cosine_s: 8.0e-3
+      num_timesteps: 1000
+      v_posterior: 0.
+    sampler_config:
+      target: diffusers.model.diffusion.samplers.VanillaSampler
+      params:
+        clip_denoised: True
+    use_ema: True
+
+
+data:
+  target: pl_utils.DataModuleFromConfig
+  params:
+    batch_size: 64
+    num_workers: 8
+    wrap: False
+    train:
+      target: diffusers.data.cifar10.Cifar10
+      params:
+        data_dir: /mnt/sdb/cifar-10-batches-py
+        mode: train
+    validation:
+      target: diffusers.data.cifar10.Cifar10
+      params:
+        data_dir: /mnt/sdb/cifar-10-batches-py
+        mode: val
+
+lightning:
+  callbacks:
+    image_logger:
+      target: pl_utils.ImageLogger
+      params:
+        batch_frequency: 5000
+        max_images: 8
+        increase_log_steps: False
+    checkpoint_callback:
+      params:
+        monitor: 'val/loss_simple_ema'
+        save_top_k: 3
+        mode: min
+
+  trainer:
+    accelerator: gpu
+    devices: 1
+    benchmark: True
+    accumulate_grad_batches: 1
+    max_epochs: 50
+    #limit_train_batches: 100

@@ -36,10 +36,10 @@ class DDPM(nn.Module):
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
     
     def forward(self, x0):
-        # t in [0, num_timesteps) -> x1...x999
-        t = torch.randint(0, self.model_config.num_timesteps, (x0.size(0),), dtype=torch.long, device=self.device)
+        # t in [0, num_timesteps) -> x1...x1000
+        t = torch.randint(0, self.model_config.num_timesteps, (x0.size(0),), dtype=torch.long, device=x0.device)
         noise = torch.randn_like(x0)
-        xt = self.q_sample(x0, noise)
+        xt = self.q_sample(x0, noise, t)
         if self.model_config.parameterization == 'eps':
             target = noise
         elif self.model_config.parameterization == 'x0':
@@ -63,8 +63,9 @@ class DDPM(nn.Module):
         }
         return loss, logdict
 
-    def q_sample(self, x0, noise):
-        return self.sqrt_alphas_cumprod * x0 + self.sqrt_one_minus_alphas_cumprod * noise
+    def q_sample(self, x0, noise, t):
+        return (self.sqrt_alphas_cumprod[t].view(-1, 1, 1, 1) * x0
+                + self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1) * noise)
 
     def p_sample(self, x, t, clip_denoised=True):
         # sample x_{t-1} from P(x_{t-1} | x_t)
@@ -79,18 +80,27 @@ class DDPM(nn.Module):
     def p_mean_variance(self, x, t, clip_denoised):
         # return the mean and variance of P(x_{t-1} | x_t)
         pred = self.model(x, t)
+        x_recon, z = self.get_x0_z_from_pred(pred, t, clip_denoised)
+        
+        p_mean = (self.posterior_mean_coef1[t].view(-1, 1, 1, 1) * x_recon
+            + self.posterior_mean_coef2[t].view(-1, 1, 1, 1) * x)
+        p_var = self.posterior_variance[t]
+        p_logvar = self.posterior_log_variance_clipped[t]
+        return p_mean, p_var, p_logvar
+
+    def get_x0_z_from_pred(self, x, t, pred, clip_denoised):
         if self.model_config.parameterization == 'eps':
-            x_recon = self.sqrt_recip_alphas_cumprod[t] * x - self.sqrt_recipm1_alphas_cumprod[t] * pred
+            x_recon = (self.sqrt_recip_alphas_cumprod[t].view(-1, 1, 1, 1) * x
+                - self.sqrt_recipm1_alphas_cumprod[t].view(-1, 1, 1, 1) * pred)
+            z = pred
         elif self.model_config.parameterization == 'x0':
             x_recon = pred
+            z = (x - self.sqrt_alphas_cumprod[t] * pred) / self.sqrt_one_minus_alphas_cumprod[t]
         
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
         
-        p_mean = self.posterior_mean_coef1[t] * x_recon + self.posterior_mean_coef2[t] * x
-        p_var = self.posterior_variance[t]
-        p_logvar = self.posterior_log_variance_clipped[t]
-        return p_mean, p_var, p_logvar
+        return x_recon, z
 
 
 class PLDDPM(pl.LightningModule):
@@ -133,21 +143,24 @@ class PLDDPM(pl.LightningModule):
                 if context is not None:
                     print(f'{context}: Restored training weights')
     
+    # @utils.simple_time_tracker
     def training_step(self, batch, batch_idx):
         loss, logdict = self.model(batch['image'])
         logdict = {f'train/{k}': v for k, v in logdict.items()}
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True)
         return loss
 
+    # @utils.simple_time_tracker
     def validation_step(self, batch, batch_idx):
         _, logdict = self.model(batch['image'])
+        logdict = {f'val/{k}': v for k, v in logdict.items()}
         with self.ema_scope():
             _, logdict_ema = self.model(batch['image'])
-            logdict_ema = {f'{k}_ema': v for k, v in logdict_ema.items()}
+            logdict_ema = {f'val/{k}_ema': v for k, v in logdict_ema.items()}
         self.log_dict(logdict, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(logdict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
     
-    def on_train_batch_end(self, batch, batch_idx):
+    def on_train_batch_end(self, outputs, batch, batch_idx):
         if self.use_ema:    # update parameter buffers in the EMA model
             self.model_ema(self.model)
 
@@ -159,7 +172,8 @@ class PLDDPM(pl.LightningModule):
         return optimizer
     
     @torch.no_grad()
-    def log_images(self, batch, N=8, log_every_t=200):
+    # @utils.simple_time_tracker
+    def log_images(self, batch, N=8, log_every_t=200, **unused_kwargs):
         x = batch['image'][:N]
         
         diffusion_row = list()
@@ -173,11 +187,11 @@ class PLDDPM(pl.LightningModule):
         
 
         with self.ema_scope():
+            noise = torch.randn((N, *x.shape[1:]), dtype=x.dtype, device=x.device)
             samples, denoise_row = self.sampler(
-                self.model, batch_size=N, shape=x.shape[1:], return_intermediates=True
+                self.model, noise, return_intermediates=True, log_every_t=log_every_t
             )
             denoise_row = torch.stack(denoise_row, 0).transpose(0, 1)
-            denoise_row = denoise_row.view(-1, denoise_row.shape[2:])
         
         logdict = {
             'inputs': x,

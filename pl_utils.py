@@ -177,7 +177,6 @@ class ImageLogger(Callback):
             self.log_steps = [self.batch_freq]
         self.clamp = clamp
         self.disabled = disabled
-        self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
 
@@ -213,45 +212,43 @@ class ImageLogger(Callback):
             Image.fromarray(grid).save(path)
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
-        check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
-        if (self.check_frequency(check_idx) and  # batch_idx % self.batch_freq == 0
-                hasattr(pl_module, "log_images") and
-                callable(pl_module.log_images) and
-                self.max_images > 0):
-            logger = type(pl_module.logger)
+        logger = type(pl_module.logger)
 
-            is_train = pl_module.training
-            if is_train:
-                pl_module.eval()
+        is_train = pl_module.training
+        if is_train:
+            pl_module.eval()
 
-            with torch.no_grad():
-                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+        with torch.no_grad():
+            images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
 
-            for k in images:
-                N = min(images[k].shape[0], self.max_images)
-                images[k] = images[k][:N]
-                if isinstance(images[k], torch.Tensor):
-                    images[k] = images[k].detach().cpu()
-                    if self.clamp:
-                        images[k] = torch.clamp(images[k], -1., 1.)
+        for k in images:
+            N = min(images[k].shape[0], self.max_images)
+            images[k] = images[k][:N]
+            if isinstance(images[k], torch.Tensor):
+                images[k] = images[k].detach().cpu()
+                if self.clamp:
+                    images[k] = torch.clamp(images[k], -1., 1.)
 
-            self.log_local(pl_module.logger.save_dir, split, images,
-                           pl_module.global_step, pl_module.current_epoch, batch_idx)
+        self.log_local(pl_module.logger.save_dir, split, images,
+                        pl_module.global_step, pl_module.current_epoch, batch_idx)
 
-            logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
-            logger_log_images(pl_module, images, pl_module.global_step, split)
+        logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
+        logger_log_images(pl_module, images, pl_module.global_step, split)
 
-            if is_train:
-                pl_module.train()
+        if is_train:
+            pl_module.train()
 
-    def check_frequency(self, check_idx):
-        if ((check_idx % self.batch_freq) == 0 or (check_idx in self.log_steps)) and (
-                check_idx > 0 or self.log_first_step):
-            try:
-                self.log_steps.pop(0)
-            except IndexError as e:
-                print(e)
-                pass
+    def should_log_this_step(self, pl_module, check_idx):
+        if self.disabled:
+            return False
+
+        if pl_module.global_step == 0 and not self.log_first_step:
+            return False
+        
+        if not hasattr(pl_module, 'log_images') and not callable(pl_module.log_images):
+            return False
+        
+        if ((check_idx % self.batch_freq) == 0 or (check_idx in self.log_steps)):
             return True
         return False
 

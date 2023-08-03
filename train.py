@@ -30,12 +30,14 @@ if __name__ == '__main__':
     model_config.learning_rate = utils.scale_learning_rate(config)
     pl_config = config.pop('lightning', OmegaConf.create())
 
+    # set callbacks
     logger = pl_utils.get_logger(args, pl_config)
     callbacks = pl_utils.get_callbacks(args, config, pl_config)
     trainer = pl.Trainer(
         **pl_config.get('trainer', OmegaConf.create()), logger=logger, callbacks=callbacks
     )
 
+    # set datasets
     pl_data = utils.instantiate_from_config(config.data)
     pl_data.prepare_data()
     pl_data.setup()
@@ -43,6 +45,7 @@ if __name__ == '__main__':
     for k in pl_data.datasets:
         print(f'{k}, {pl_data.datasets[k].__class__.__name__}, {len(pl_data.datasets[k])}')
 
+    # set model
     pl_model = utils.instantiate_from_config(config.model)
 
     try:

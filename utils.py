@@ -1,4 +1,6 @@
+import functools
 import importlib
+import time
 
 
 def instantiate_from_config(config):
@@ -43,3 +45,17 @@ def scale_learning_rate(config):
         print("++++ NOT USING LR SCALING ++++")
         print(f"Setting learning rate to {learning_rate:.2e}")
     return learning_rate
+
+
+def simple_time_tracker(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        try:
+            res = func(*args, **kwargs)
+        finally:
+            duration = time.time() - start_time
+        print(f'Simple time tracker: Function {func.__name__} runs for {duration} seconds.')
+        return res
+
+    return wrapper
