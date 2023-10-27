@@ -8,10 +8,10 @@ import torch
 from torch.utils.data import DataLoader
 import torchvision
 
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-from pytorch_lightning.utilities.rank_zero import rank_zero_only
-from pytorch_lightning.utilities import rank_zero_info
+import lightning as pl
+from lightning.pytorch.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.utilities import rank_zero_info
 
 from utils import instantiate_from_config
 
@@ -123,11 +123,11 @@ class SetupCallback(Callback):
         self.config = config
         self.lightning_config = lightning_config
 
-    def on_exception(self, trainer, pl_module, exception):
-        if trainer.global_rank == 0:
-            print("Summoning checkpoint.")
-            ckpt_path = os.path.join(self.ckptdir, "last.ckpt")
-            trainer.save_checkpoint(ckpt_path)
+    # def on_exception(self, trainer, pl_module, exception):
+    #     if trainer.global_rank == 0:
+    #         print("Summoning checkpoint.")
+    #         ckpt_path = os.path.join(self.ckptdir, "last.ckpt")
+    #         trainer.save_checkpoint(ckpt_path)
 
     def on_fit_start(self, trainer, pl_module):
         if trainer.global_rank == 0:
@@ -149,16 +149,16 @@ class SetupCallback(Callback):
             OmegaConf.save(OmegaConf.create({"lightning": self.lightning_config}),
                            os.path.join(self.cfgdir, "{}-lightning.yaml".format(self.now)))
 
-        else:
-            # ModelCheckpoint callback created log directory --- remove it
-            if not self.resume and os.path.exists(self.logdir):
-                dst, name = os.path.split(self.logdir)
-                dst = os.path.join(dst, "child_runs", name)
-                os.makedirs(os.path.split(dst)[0], exist_ok=True)
-                try:
-                    os.rename(self.logdir, dst)
-                except FileNotFoundError:
-                    pass
+        # else:
+        #     # ModelCheckpoint callback created log directory --- remove it
+        #     if not self.resume and os.path.exists(self.logdir):
+        #         dst, name = os.path.split(self.logdir)
+        #         dst = os.path.join(dst, "child_runs", name)
+        #         os.makedirs(os.path.split(dst)[0], exist_ok=True)
+        #         try:
+        #             os.rename(self.logdir, dst)
+        #         except FileNotFoundError:
+        #             pass
 
 
 class ImageLogger(Callback):
@@ -232,8 +232,8 @@ class ImageLogger(Callback):
         self.log_local(pl_module.logger.save_dir, split, images,
                         pl_module.global_step, pl_module.current_epoch, batch_idx)
 
-        logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
-        logger_log_images(pl_module, images, pl_module.global_step, split)
+        # logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
+        # logger_log_images(pl_module, images, pl_module.global_step, split)
 
         if is_train:
             pl_module.train()
@@ -319,26 +319,26 @@ def get_logger(opt, lightning_config):
 def get_callbacks(args, config, lightning_config):
     # add callback which sets up log directory
     default_callbacks_cfg = {
-        "setup_callback": {
-            "target": "pl_utils.SetupCallback",
-            "params": {
-                "resume": args.resume,
-                "now": args.now,
-                "logdir": args.logdir,
-                "ckptdir": args.ckptdir,
-                "cfgdir": args.cfgdir,
-                "config": config,
-                "lightning_config": lightning_config,
-            }
-        },
-        "image_logger": {
-            "target": "pl_utils.ImageLogger",
-            "params": {
-                "batch_frequency": 750,
-                "max_images": 4,
-                "clamp": True
-            }
-        },
+        # "setup_callback": {
+        #     "target": "pl_utils.SetupCallback",
+        #     "params": {
+        #         "resume": args.resume,
+        #         "now": args.now,
+        #         "logdir": args.logdir,
+        #         "ckptdir": args.ckptdir,
+        #         "cfgdir": args.cfgdir,
+        #         "config": config,
+        #         "lightning_config": lightning_config,
+        #     }
+        # },
+        # "image_logger": {
+        #     "target": "pl_utils.ImageLogger",
+        #     "params": {
+        #         "batch_frequency": 750,
+        #         "max_images": 4,
+        #         "clamp": True
+        #     }
+        # },
         "learning_rate_logger": {
             "target": "pl_utils.LearningRateMonitor",
             "params": {
