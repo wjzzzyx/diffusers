@@ -5,6 +5,7 @@ from omegaconf import OmegaConf
 import os
 import torch
 
+import pl_utils
 import utils
 
 
@@ -17,6 +18,7 @@ if __name__ == '__main__':
     config_paths = glob.glob(os.path.join(args.logdir, 'configs/*.yaml'))
     configs = [OmegaConf.load(p) for p in config_paths]
     config = OmegaConf.merge(*configs)
+    pl_config = config.pop('lightning')
 
     test_dataset = utils.instantiate_from_config(config.data.test)
     test_dataloader = torch.utils.data.DataLoader(
@@ -27,11 +29,14 @@ if __name__ == '__main__':
     )
 
     pl_model = utils.instantiate_from_config(config.model)
-    pl_model.load_from_checkpoint(args.checkpoint, map_location=None)
+    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    pl_model.load_state_dict(checkpoint['state_dict'])    # only model weights are loaded
 
+    logger = pl_utils.get_logger(args, pl_config)
     trainer = pl.Trainer(
         accelerator='gpu',
         devices=1,
+        logger=logger,
     )
 
     trainer.test(pl_model, test_dataloader)
