@@ -1,0 +1,75 @@
+exp_name: debug
+
+model:
+  target: ocr.model.mixnet.PLBase
+  params:
+    model_config:
+      embed: False
+      onlybackbone: False
+      mid: False
+      pos:
+      num_points: 20
+      know: False
+      knowledge: mixTriHRnet_cbam
+      know_resume: 
+      loss: CrossEntropyLoss
+      pretrained:
+      scale: 1
+      net: FSNet_M
+      adj_num: 4
+      use_hard: True
+      scale: 1
+      dis_threshold: 0.35
+      cls_threshold: 0.875
+      test_size: [640, 960]
+    
+    optimizer_config:
+      learning_rate: 0.001
+      lr_adjust: fix
+      stepvalues:
+      weight_decay: 0
+      gamma: 0.1
+      momentum: 0.9
+
+data:
+  batch_size: 12
+  num_workers: 4
+  rescale: 255.0
+  train:
+    target: ocr.data.total_text.TotalText
+    params:
+      data_root:
+      mode: train
+      max_annotation: 64
+      num_points: 20
+      approx_factor: 0.004
+      input_size: 640
+      means: [0.485, 0.456, 0.406]
+      stds: [0.229, 0.224, 0.225]
+  val:
+    target: ocr.data.total_text.TotalText
+    params:
+      data_root:
+      mode: val
+      max_annotation: 64
+      num_points: 20
+      approx_factor: 0.004
+      input_size: 640
+      means: [0.485, 0.456, 0.406]
+      stds: [0.229, 0.224, 0.225]
+  test:
+    target: ocr.data.total_text.TotalText
+    params:
+      data_root:
+      mode: test
+      max_annotation: 64
+      num_points: 20
+      approx_factor: 0.004
+      input_size: 640
+      means: [0.485, 0.456, 0.406]
+      stds: [0.229, 0.224, 0.225]
+
+lightning:
+  trainer:
+    max_epochs: 250
+    gradient_clip_val: 25
