@@ -336,15 +336,14 @@ class CBAM(nn.Module):
 
 class FPN(nn.Module):
 
-    def __init__(self, backbone='FSNet_M', is_training=True):
+    def __init__(self, backbone='FSNet_M'):
         super().__init__()
-        self.is_training = is_training
         self.backbone_name = backbone
         self.cbam_block = False
         self.hor_block = False
 
         if backbone in ["FSNet_hor"]:
-            self.backbone = FSNet_M(pretrained=is_training)
+            self.backbone = FSNet_M(pretrained=False)
             out_channels = self.backbone.channels * 4
             self.hor_block = True
             self.hors = nn.ModuleList()
@@ -355,13 +354,13 @@ class FPN(nn.Module):
             self.skipfpn = True
 
         elif backbone in ["FSNet_S"]:
-            self.backbone = FSNet_S(pretrained=is_training)
+            self.backbone = FSNet_S(pretrained=False)
             out_channels = self.backbone.channels * 4
             self.upc1 = nn.ConvTranspose2d(32, 32, kernel_size=4, stride=2, padding=1)
             self.reduceLayer = reduceBlock(out_channels * 4, 32, up = True)
 
         elif backbone in ["FSNet_M"]:
-            self.backbone = FSNet_M(pretrained=is_training)
+            self.backbone = FSNet_M(pretrained=False)
             out_channels = self.backbone.channels * 4
             self.upc1 = nn.ConvTranspose2d(32, 32, kernel_size=4, stride=2, padding=1)
             self.reduceLayer = reduceBlock(out_channels * 4, 32, up = True)
@@ -696,7 +695,7 @@ class midlinePredictor(nn.Module):
 
 
 class Evolution(nn.Module):
-    def __init__(self, node_num, seg_channel, scale, dis_threshold, cls_threshold, approx_factor, is_training=True):
+    def __init__(self, node_num, seg_channel, scale, dis_threshold, cls_threshold, approx_factor):
         super(Evolution, self).__init__()
         self.num_points = node_num
         self.seg_channel = seg_channel
@@ -704,14 +703,13 @@ class Evolution(nn.Module):
         self.dis_threshold = dis_threshold
         self.cls_threshold = cls_threshold
         self.approx_factor = approx_factor
-        self.is_training = is_training
         self.clip_dis = 100
 
         self.iter = 3
         for i in range(self.iter):
             evolve_gcn = Transformer(seg_channel, 128, num_heads=8, dim_feedforward=1024, drop_rate=0.0, if_resi=True, block_nums=3)
             self.__setattr__('evolve_gcn' + str(i), evolve_gcn)
-        if not is_training:
+        if not self.training:
             self.iter = 1
 
         for m in self.modules():
@@ -827,7 +825,7 @@ class Evolution(nn.Module):
         return i_poly
 
     def forward(self, embed_feature, input=None, seg_preds=None, switch="gt", embed = None):
-        if self.is_training:
+        if self.training:
             init_polys, inds, confidences = self.get_boundary_proposal(input=input, seg_preds=seg_preds, switch=switch)
             # TODO sample fix number
         else:
@@ -847,11 +845,11 @@ class Evolution(nn.Module):
 
 class TextNet(nn.Module):
 
-    def __init__(self, model_config, is_training=True):
+    def __init__(self, model_config):
         super().__init__()
-        self.is_training = is_training
-        self.fpn = FPN(model_config.net, is_training=is_training)
+        self.model_config = model_config
 
+        self.fpn = FPN(model_config.net)
         self.seg_head = nn.Sequential(
             nn.Conv2d(32, 16, kernel_size=3, padding=2, dilation=2),
             nn.PReLU(),
@@ -873,9 +871,23 @@ class TextNet(nn.Module):
             if model_config.mid:
                 self.BPN = midlinePredictor(seg_channel=32+4)
             elif model_config.pos:
-                self.BPN = Evolution(model_config.num_points, seg_channel=32+4+2, is_training=is_training)
+                self.BPN = Evolution(
+                    model_config.num_points,
+                    seg_channel=32+4+2,
+                    scale=model_config.scale,
+                    dis_threshold=model_config.dis_threshold,
+                    cls_threshold=model_config.cls_threshold,
+                    approx_factor=model_config.approx_factor,
+                )
             else:
-                self.BPN = Evolution(model_config.num_points, seg_channel=32+4, is_training=is_training)
+                self.BPN = Evolution(
+                    model_config.num_points,
+                    seg_channel=32+4+2,
+                    scale=model_config.scale,
+                    dis_threshold=model_config.dis_threshold,
+                    cls_threshold=model_config.cls_threshold,
+                    approx_factor=model_config.approx_factor,
+                )
 
     # def load_model(self, model_path):
     #     print('Loading from {}'.format(model_path))
@@ -884,14 +896,14 @@ class TextNet(nn.Module):
 
     def forward(self, input_dict, test_speed=False, knowledge = False):
         output = {}
-        b, c, h, w = input_dict["img"].shape
+        b, c, h, w = input_dict["image"].shape
         
         if self.is_training:# or cfg.exp_name in ['ArT', 'MLT2017', "MLT2019"] or test_speed:
-            image = input_dict["img"]
+            image = input_dict["image"]
         else:
             # image = input_dict["img"]
             image = torch.zeros((b, c, self.model_config.test_size[1], self.model_config.test_size[1]), dtype=torch.float32)
-            image[:, :, :h, :w] = input_dict["img"][:, :, :, :]
+            image[:, :, :h, :w] = input_dict["image"][:, :, :, :]
 
         up1 = self.fpn(image)
         if self.model_config.know or knowledge:
@@ -1175,7 +1187,7 @@ class TextLoss(nn.Module):
         if self.mid:
             loss_dict['midline_loss'] = gama*midline_loss
 
-        return loss_dict
+        return loss, loss_dict
 
 
 class PolyMatchingLoss(nn.Module):
@@ -1188,19 +1200,18 @@ class PolyMatchingLoss(nn.Module):
         self.L2_loss = torch.nn.MSELoss(reduce=False, size_average=False)
 
         batch_size = 1
-        pidxall = np.zeros(shape=(batch_size, pnum, pnum), dtype=np.int32)
+        pidxall = np.zeros(shape=(batch_size, pnum, pnum), dtype=int)
         for b in range(batch_size):
             for i in range(pnum):
                 pidx = (np.arange(pnum) + i) % pnum
                 pidxall[b, i] = pidx
 
         pidxall = torch.from_numpy(np.reshape(pidxall, newshape=(batch_size, -1)))
-        self.feature_id = pidxall.unsqueeze_(2).long().expand(pidxall.size(0), pidxall.size(1), 2).detach()
-        # print(self.feature_id.shape)
+        self.register_buffer('feature_id', pidxall.unsqueeze_(2).long().expand(-1, -1, 2))
 
     def match_loss(self, pred, gt):
         batch_size = pred.shape[0]
-        feature_id = self.feature_id.expand(batch_size, self.feature_id.size(1), 2)
+        feature_id = self.feature_id.expand(batch_size, -1, -1)
 
         gt_expand = torch.gather(gt, 1, feature_id).view(batch_size, self.pnum, self.pnum, 2)
         pred_expand = pred.unsqueeze(1)
@@ -1217,7 +1228,7 @@ class PolyMatchingLoss(nn.Module):
         return min_dis
 
     def forward(self, pred_list, gt):
-        loss = torch.tensor(0.)
+        loss = 0
         for pred in pred_list:
             loss += torch.mean(self.match_loss(pred, gt))
 
@@ -1278,11 +1289,15 @@ class PLBase(lightning.LightningModule):
         self.model_config = model_config
         self.optimizer_config = optimizer_config
 
-        self.model = TextNet(model_config, is_training=True)
-        if self.model.loss == 'TextLoss_ctw':
-            self.loss_fn = TextLoss_ctw()
-        else:
-            self.loss_fn = TextLoss()
+        self.model = TextNet(model_config)
+        self.loss_fn = TextLoss(
+            model_config.num_points,
+            model_config.mid,
+            model_config.embed,
+            model_config.onlybackbone,
+            model_config.scale,
+            optimizer_config.max_epochs,
+        )
         
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
