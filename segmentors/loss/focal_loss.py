@@ -37,23 +37,74 @@ def focal_loss(
         return loss.sum()
     elif reduction == 'none':
         return loss
+    else:
+        raise ValueError(f'Unsupported reduction {reduction}')
+
+
+def binary_focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    gamma: float,
+    pos_weight: float = None,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Args:
+        logits: (B, H, W) unnormalized positive logits output from the model
+        targets: (B, H, W) class indexes in {0, 1}
+        gamma: exponent
+        pos_weight: weight for the positive class between [0, 1]
+        reduction: choices in ('mean', 'sum', 'none')
+    """
+    eps = 1e-4
+    prob = F.sigmoid(logits)
+    prob = torch.clamp(prob, eps, 1.0 - eps)
+
+    pos_loss = - pos_weight * torch.pow(1 - prob, gamma).detach() * F.logsigmoid(logits)
+    neg_loss = - (1 - pos_weight) * torch.pow(prob, gamma).detach() * F.logsigmoid(-logits)
+    loss = torch.where(targets, pos_loss, neg_loss)
+
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    elif reduction == 'none':
+        return loss
+    else:
+        raise ValueError(f'Unsupported reduction {reduction}')
 
 
 class FocalLoss(nn.Module):
     """
-    focal_loss = -alpha * (1 - p)^gamma * logp
+    focal_loss = - weight * (1 - p)^gamma * logp
     """
-    def __init__(self, alpha: float, gamma: float, weight: Optional[torch.Tensor] = None, reduction: str = 'mean'):
+    def __init__(self, gamma: float, weight: Optional[torch.Tensor] = None, reduction: str = 'mean'):
         super().__init__()
         self.reduction = reduction
         self.register_buffer('weight', weight)
-        self.alpha = alpha
         self.gamma = gamma
     
     def forward(self, logits, targets):
         return focal_loss(
-            logits, targets, alpha=self.alpha, gamma=self.gamma,
+            logits, targets, gamma=self.gamma,
             weight=self.weight, reduction=self.reduction
+        )
+
+
+class BinaryFocalLoss(nn.Module):
+    """
+    binary_focal_loss = - pos_weight * (1 - p)^gamma * logp - (1 - pos_weight) * p^gamma * log(1 - p)
+    """
+    def __init__(self, gamma: float, pos_weight: float = None, reduction: str = 'mean'):
+        super().__init__()
+        self.reduction = reduction
+        self.pos_weight = pos_weight
+        self.gamma = gamma
+    
+    def forward(self, logits, targets):
+        return binary_focal_loss(
+            logits, targets, gamma=self.gamma,
+            pos_weight=self.pos_weight, reduction=self.reduction
         )
 
 
