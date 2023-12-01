@@ -233,8 +233,18 @@ class TextDataset(object):
         ignore_tags = torch.from_numpy(ignore_tags).int()
         edge_field = torch.from_numpy(edge_field).int()
 
-        return image, train_mask, tr_mask, distance_field, \
-               direction_field, weight_matrix, gt_points, proposal_points, ignore_tags, edge_field
+        return {
+            'image': image,
+            'train_mask': train_mask,
+            'tr_mask': tr_mask,
+            'distance_field': distance_field,
+            'direction_field': direction_field,
+            'weight_matrix': weight_matrix,
+            'gt_points': gt_points,
+            'proposal_points': proposal_points,
+            'ignore_tags': ignore_tags,
+            'edge_field': edge_field,
+        }
 
     def get_test_data(self, image, polygons=None, image_id=None, image_path=None):
         H, W, _ = image.shape
@@ -255,7 +265,11 @@ class TextDataset(object):
                 else:
                     label_tag[i] = -1
 
-        meta = {
+        # to pytorch channel sequence
+        image = image.transpose(2, 0, 1)
+
+        return {
+            'image': image,
             'image_id': image_id,
             'image_path': image_path,
             'annotation': points,
@@ -264,11 +278,6 @@ class TextDataset(object):
             'Height': H,
             'Width': W
         }
-
-        # to pytorch channel sequence
-        image = image.transpose(2, 0, 1)
-
-        return image, meta
 
     def __len__(self):
         raise NotImplementedError()

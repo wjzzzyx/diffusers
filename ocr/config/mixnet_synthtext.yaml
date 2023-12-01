@@ -1,6 +1,7 @@
 exp_name: debug
 
 model:
+  seed: 42
   target: ocr.model.mixnet.PLBase
   params:
     model_config:
@@ -18,27 +19,29 @@ model:
       net: FSNet_M
       adj_num: 4
       use_hard: True
-      scale: 1
       dis_threshold: 0.35
       cls_threshold: 0.875
       test_size: [640, 960]
+      approx_factor: 0.004
     
     optimizer_config:
+      optim: Adam
       learning_rate: 0.001
       lr_adjust: fix
       stepvalues:
       weight_decay: 0
       gamma: 0.1
       momentum: 0.9
+      max_epochs: 250
 
 data:
-  batch_size: 12
+  batch_size: 4
   num_workers: 4
   rescale: 255.0
   train:
     target: ocr.data.total_text.TotalText
     params:
-      data_root:
+      data_root: /mnt/sdb/ocr_datasets/total_text
       mode: train
       max_annotation: 64
       num_points: 20
@@ -49,7 +52,7 @@ data:
   val:
     target: ocr.data.total_text.TotalText
     params:
-      data_root:
+      data_root: /mnt/sdb/ocr_datasets/total_text
       mode: val
       max_annotation: 64
       num_points: 20
@@ -60,7 +63,7 @@ data:
   test:
     target: ocr.data.total_text.TotalText
     params:
-      data_root:
+      data_root: /mnt/sdb/ocr_datasets/total_text
       mode: test
       max_annotation: 64
       num_points: 20
@@ -71,5 +74,7 @@ data:
 
 lightning:
   trainer:
+    accelerator: gpu
+    devices: 1
     max_epochs: 250
     gradient_clip_val: 25

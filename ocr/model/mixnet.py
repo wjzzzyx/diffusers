@@ -1,6 +1,12 @@
 import cv2
 import lightning
+import math
+import matplotlib
+matplotlib.use('agg')
+from matplotlib import cm
 import numpy as np
+import os
+import pylab as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -901,7 +907,6 @@ class TextNet(nn.Module):
         if self.is_training:# or cfg.exp_name in ['ArT', 'MLT2017', "MLT2019"] or test_speed:
             image = input_dict["image"]
         else:
-            # image = input_dict["img"]
             image = torch.zeros((b, c, self.model_config.test_size[1], self.model_config.test_size[1]), dtype=torch.float32)
             image[:, :, :h, :w] = input_dict["image"][:, :, :, :]
 
@@ -1045,8 +1050,8 @@ class TextLoss(nn.Module):
             energy = self.get_poly_energy(energy_field.unsqueeze(1), py, inds, h, w)
             energys.append(energy.squeeze(1).sum(-1))
 
-        regular_loss = torch.tensor(0.)
-        energy_loss = torch.tensor(0.)
+        regular_loss = 0
+        energy_loss = 0
         for i, e in enumerate(energys[1:]):
             regular_loss += torch.clamp(e - energys[i], min=0.0).mean()
             energy_loss += torch.where(e <= 0.01, torch.tensor(0.), e).mean()
@@ -1090,7 +1095,7 @@ class TextLoss(nn.Module):
         distance_field = input_dict['distance_field']
         direction_field = input_dict['direction_field']
         weight_matrix = input_dict['weight_matrix']
-        gt_tags = input_dict['gt_points']
+        gt_points = input_dict['gt_points']
         instance = input_dict['tr_mask'].long()
         conf = tr_mask.float()
         
@@ -1133,7 +1138,7 @@ class TextLoss(nn.Module):
             return loss_dict
 
         # boundary point loss
-        point_loss = self.PolyMatchingLoss(py_preds[1:], gt_tags[inds])
+        point_loss = self.PolyMatchingLoss(py_preds[1:], gt_points[inds])
         if self.mid:
             midline = output_dict["midline"]
             gt_midline = input_dict['gt_mid_points']
@@ -1232,7 +1237,7 @@ class PolyMatchingLoss(nn.Module):
         for pred in pred_list:
             loss += torch.mean(self.match_loss(pred, gt))
 
-        return loss / torch.tensor(len(pred_list))
+        return loss / len(pred_list)
 
 
 class overlap_loss(nn.Module):
@@ -1316,6 +1321,105 @@ class PLBase(lightning.LightningModule):
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
         return loss
     
+    def validation_step(self, batch, batch_idx):
+        outputs = self.model(batch)
+        fy_preds = F.interpolate(outputs["fy_preds"], scale_factor=self.model_config.scale, mode='bilinear')
+        fy_preds = fy_preds.cpu().numpy()
+
+        py_preds = outputs["py_preds"][1:]
+        init_polys = outputs["py_preds"][0]
+        inds = outputs["inds"]
+
+        if self.model_config.mid == True:
+            midline = outputs["midline"]
+
+        image = batch['img']
+        tr_mask = batch['tr_mask'].cpu().numpy() > 0
+        distance_field = batch['distance_field'].data.cpu().numpy()
+        direction_field = batch['direction_field']
+        weight_matrix = batch['weight_matrix']
+        gt_tags = batch['gt_points'].cpu().numpy()
+        ignore_tags = batch['ignore_tags'].cpu().numpy()
+
+        b, c, _, _ = fy_preds.shape
+        for i in range(b):
+
+            fig = plt.figure(figsize=(12, 9))
+
+            mask_pred = fy_preds[i, 0, :, :]
+            distance_pred = fy_preds[i, 1, :, :]
+            norm_pred = np.sqrt(fy_preds[i, 2, :, :] ** 2 + fy_preds[i, 3, :, :] ** 2)
+            angle_pred = 180 / math.pi * np.arctan2(fy_preds[i, 2, :, :], fy_preds[i, 3, :, :] + 0.00001)
+
+            ax1 = fig.add_subplot(341)
+            ax1.set_title('mask_pred')
+            im1 = ax1.imshow(mask_pred, cmap=cm.jet)
+
+            ax2 = fig.add_subplot(342)
+            ax2.set_title('distance_pred')
+            im2 = ax2.imshow(distance_pred, cmap=cm.jet)
+
+            ax3 = fig.add_subplot(343)
+            ax3.set_title('norm_pred')
+            im3 = ax3.imshow(norm_pred, cmap=cm.jet)
+
+            ax4 = fig.add_subplot(344)
+            ax4.set_title('angle_pred')
+            im4 = ax4.imshow(angle_pred, cmap=cm.jet)
+
+            mask_gt = tr_mask[i]
+            distance_gt = distance_field[i]
+            # gt_flux = 0.999999 * direction_field[i] / (direction_field[i].norm(p=2, dim=0) + 1e-9)
+            gt_flux = direction_field[i].cpu().numpy()
+            norm_gt = np.sqrt(gt_flux[0, :, :] ** 2 + gt_flux[1, :, :] ** 2)
+            angle_gt = 180 / math.pi * np.arctan2(gt_flux[0, :, :], gt_flux[1, :, :]+0.00001)
+
+            ax11 = fig.add_subplot(345)
+            im11 = ax11.imshow(mask_gt, cmap=cm.jet)
+
+            ax22 = fig.add_subplot(346)
+            im22 = ax22.imshow(distance_gt, cmap=cm.jet)
+
+            ax33 = fig.add_subplot(347)
+            im33 = ax33.imshow(norm_gt, cmap=cm.jet)
+
+            ax44 = fig.add_subplot(348)
+            im44 = ax44.imshow(angle_gt, cmap=cm.jet)
+
+            img_show = image[i].permute(1, 2, 0).cpu().numpy()
+            img_show = ((img_show * self.model_config.stds + self.model_config.means) * 255).astype(np.uint8)
+            img_show = np.ascontiguousarray(img_show[:, :, ::-1])
+            shows = []
+            gt = gt_tags[i]
+            gt_idx = np.where(ignore_tags[i] > 0)
+            gt_py = gt[gt_idx[0], :, :]
+            index = torch.where(inds[0] == i)[0]
+            init_py = init_polys[index].detach().cpu().numpy()
+
+            image_show = img_show.copy()
+            cv2.drawContours(image_show, init_py.astype(np.int32), -1, (255, 0, 0), 2)
+            cv2.drawContours(image_show, gt_py.astype(np.int32), -1, (0, 255, 255), 2)
+            shows.append(image_show)
+            for py in py_preds:
+                contours = py[index].detach().cpu().numpy()
+                image_show = img_show.copy()
+                cv2.drawContours(image_show, init_py.astype(np.int32), -1, (0, 125, 125), 2)
+                cv2.drawContours(image_show, gt_py.astype(np.int32), -1, (255, 125, 0), 2)
+                cv2.drawContours(image_show, contours.astype(np.int32), -1, (0, 255, 125), 2)
+                if self.model_config.mid == True:
+                    cv2.polylines(image_show, midline.astype(np.int32), False, (125, 255, 0), 2)
+                shows.append(image_show)
+
+            for idx, im_show in enumerate(shows):
+                axb = fig.add_subplot(3, 4, 9+idx)
+                # axb.set_title('boundary_{}'.format(idx))
+                # axb.set_autoscale_on(True)
+                im11 = axb.imshow(im_show, cmap=cm.jet)
+                # plt.colorbar(im11, shrink=0.5)
+
+            plt.savefig(os.path.join(self.logger.log_dir, f'{i}.png'))
+            plt.close(fig)
+    
     def configure_optimizers(self):
         if self.optimizer_config.optim == 'Adam':
             optimizer = torch.optim.Adam(
@@ -1339,3 +1443,19 @@ class PLBase(lightning.LightningModule):
                 'interval': 'epoch'
             }
         }
+
+    @torch.no_grad()
+    def log_images(self, batch, batch_idx):
+        dirname = os.path.join(self.logger.log_dir, 'log_images', mode)
+        image = batch['image'][0].permute(1, 2, 0).cpu().numpy()
+        image = ((image * self.model_config.stds + self.model_config.means) * 255).astype(np.uint8)
+        gt_vis = self.visualize_gt(image, gt_contour, label_tag)
+        show_boundary, heatmap = visualize_detection(image, batch, meta)
+        show_map = np.concatenate([heatmap, gt_vis], axis=1)
+        show_map = cv2.resize(show_map, (320 * 3, 320))
+        im_vis = np.concatenate([show_map, show_boundary], axis=0)
+        cv2.imwrite(os.path.join(dirname, meta['image_id'][0].split('.')[0] + '.jpg'), im_vis)
+
+        contours = batch['py_preds'][-1].int().cpu().numpy()
+        img_show, contours = rescale_result(img_show, contours, H, W)
+
