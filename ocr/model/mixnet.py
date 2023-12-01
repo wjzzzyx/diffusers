@@ -774,11 +774,11 @@ class Evolution(nn.Module):
                 init_polys.append(poly)
 
         if len(inds) > 0:
-            inds = torch.from_numpy(np.array(inds)).permute(1, 0).to(input["img"].device, non_blocking=True)
-            init_polys = torch.from_numpy(np.array(init_polys)).to(input["img"].device, non_blocking=True).float()
+            inds = torch.from_numpy(np.array(inds)).permute(1, 0).to(input["image"].device, non_blocking=True)
+            init_polys = torch.from_numpy(np.array(init_polys)).to(input["image"].device, non_blocking=True).float()
         else:
-            init_polys = torch.from_numpy(np.array(init_polys)).to(input["img"].device, non_blocking=True).float()
-            inds = torch.from_numpy(np.array(inds)).to(input["img"].device, non_blocking=True)
+            init_polys = torch.from_numpy(np.array(init_polys)).to(input["image"].device, non_blocking=True).float()
+            inds = torch.from_numpy(np.array(inds)).to(input["image"].device, non_blocking=True)
 
         return init_polys, inds, confidences
 
@@ -823,7 +823,7 @@ class Evolution(nn.Module):
         h, w = cnn_feature.size(2)*self.scale, cnn_feature.size(3)*self.scale
         node_feats = get_node_feature(cnn_feature, i_it_poly, ind, h, w)
         i_poly = i_it_poly + torch.clamp(snake(node_feats).permute(0, 2, 1), -self.clip_dis, self.clip_dis)[:,:num_point]
-        if self.is_training:
+        if self.training:
             i_poly = torch.clamp(i_poly, 0, w-1)
         else:
             i_poly[:, :, 0] = torch.clamp(i_poly[:, :, 0], 0, w - 1)
@@ -888,7 +888,7 @@ class TextNet(nn.Module):
             else:
                 self.BPN = Evolution(
                     model_config.num_points,
-                    seg_channel=32+4+2,
+                    seg_channel=32+4,
                     scale=model_config.scale,
                     dis_threshold=model_config.dis_threshold,
                     cls_threshold=model_config.cls_threshold,
@@ -904,10 +904,10 @@ class TextNet(nn.Module):
         output = {}
         b, c, h, w = input_dict["image"].shape
         
-        if self.is_training:# or cfg.exp_name in ['ArT', 'MLT2017', "MLT2019"] or test_speed:
+        if self.training:# or cfg.exp_name in ['ArT', 'MLT2017', "MLT2019"] or test_speed:
             image = input_dict["image"]
         else:
-            image = torch.zeros((b, c, self.model_config.test_size[1], self.model_config.test_size[1]), dtype=torch.float32)
+            image = input_dict['image'].new_zeros((b, c, self.model_config.test_size[1], self.model_config.test_size[1]), dtype=torch.float32)
             image[:, :, :h, :w] = input_dict["image"][:, :, :, :]
 
         up1 = self.fpn(image)
@@ -1316,109 +1316,111 @@ class PLBase(lightning.LightningModule):
     
     def training_step(self, batch, batch_idx):
         outputs = self.model(batch)
-        loss, logdict = self.loss_fn(outputs, batch, eps=self.current_epoch + 1)
+        loss, logdict = self.loss_fn(batch, outputs, eps=self.current_epoch + 1)
         logdict = {f'train/{k}': v for k, v in logdict.items()}
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        outputs = self.model(batch)
-        fy_preds = F.interpolate(outputs["fy_preds"], scale_factor=self.model_config.scale, mode='bilinear')
-        fy_preds = fy_preds.cpu().numpy()
+        
+        os.makedirs(self.logger.log_dir, exist_ok=True)
 
-        py_preds = outputs["py_preds"][1:]
-        init_polys = outputs["py_preds"][0]
-        inds = outputs["inds"]
+        if batch_idx % 100 == 0:
+            fy_preds = F.interpolate(outputs["fy_preds"], scale_factor=self.model_config.scale, mode='bilinear')
+            fy_preds = fy_preds.cpu().numpy()
 
-        if self.model_config.mid == True:
-            midline = outputs["midline"]
+            py_preds = outputs["py_preds"][1:]
+            init_polys = outputs["py_preds"][0]
+            inds = outputs["inds"]
 
-        image = batch['img']
-        tr_mask = batch['tr_mask'].cpu().numpy() > 0
-        distance_field = batch['distance_field'].data.cpu().numpy()
-        direction_field = batch['direction_field']
-        weight_matrix = batch['weight_matrix']
-        gt_tags = batch['gt_points'].cpu().numpy()
-        ignore_tags = batch['ignore_tags'].cpu().numpy()
+            if self.model_config.mid == True:
+                midline = outputs["midline"]
 
-        b, c, _, _ = fy_preds.shape
-        for i in range(b):
+            image = batch['img']
+            tr_mask = batch['tr_mask'].cpu().numpy() > 0
+            distance_field = batch['distance_field'].data.cpu().numpy()
+            direction_field = batch['direction_field']
+            weight_matrix = batch['weight_matrix']
+            gt_tags = batch['gt_points'].cpu().numpy()
+            ignore_tags = batch['ignore_tags'].cpu().numpy()
 
-            fig = plt.figure(figsize=(12, 9))
+            b, c, _, _ = fy_preds.shape
+            for i in range(b):
 
-            mask_pred = fy_preds[i, 0, :, :]
-            distance_pred = fy_preds[i, 1, :, :]
-            norm_pred = np.sqrt(fy_preds[i, 2, :, :] ** 2 + fy_preds[i, 3, :, :] ** 2)
-            angle_pred = 180 / math.pi * np.arctan2(fy_preds[i, 2, :, :], fy_preds[i, 3, :, :] + 0.00001)
+                fig = plt.figure(figsize=(12, 9))
 
-            ax1 = fig.add_subplot(341)
-            ax1.set_title('mask_pred')
-            im1 = ax1.imshow(mask_pred, cmap=cm.jet)
+                mask_pred = fy_preds[i, 0, :, :]
+                distance_pred = fy_preds[i, 1, :, :]
+                norm_pred = np.sqrt(fy_preds[i, 2, :, :] ** 2 + fy_preds[i, 3, :, :] ** 2)
+                angle_pred = 180 / math.pi * np.arctan2(fy_preds[i, 2, :, :], fy_preds[i, 3, :, :] + 0.00001)
 
-            ax2 = fig.add_subplot(342)
-            ax2.set_title('distance_pred')
-            im2 = ax2.imshow(distance_pred, cmap=cm.jet)
+                ax1 = fig.add_subplot(341)
+                ax1.set_title('mask_pred')
+                im1 = ax1.imshow(mask_pred, cmap=cm.jet)
 
-            ax3 = fig.add_subplot(343)
-            ax3.set_title('norm_pred')
-            im3 = ax3.imshow(norm_pred, cmap=cm.jet)
+                ax2 = fig.add_subplot(342)
+                ax2.set_title('distance_pred')
+                im2 = ax2.imshow(distance_pred, cmap=cm.jet)
 
-            ax4 = fig.add_subplot(344)
-            ax4.set_title('angle_pred')
-            im4 = ax4.imshow(angle_pred, cmap=cm.jet)
+                ax3 = fig.add_subplot(343)
+                ax3.set_title('norm_pred')
+                im3 = ax3.imshow(norm_pred, cmap=cm.jet)
 
-            mask_gt = tr_mask[i]
-            distance_gt = distance_field[i]
-            # gt_flux = 0.999999 * direction_field[i] / (direction_field[i].norm(p=2, dim=0) + 1e-9)
-            gt_flux = direction_field[i].cpu().numpy()
-            norm_gt = np.sqrt(gt_flux[0, :, :] ** 2 + gt_flux[1, :, :] ** 2)
-            angle_gt = 180 / math.pi * np.arctan2(gt_flux[0, :, :], gt_flux[1, :, :]+0.00001)
+                ax4 = fig.add_subplot(344)
+                ax4.set_title('angle_pred')
+                im4 = ax4.imshow(angle_pred, cmap=cm.jet)
 
-            ax11 = fig.add_subplot(345)
-            im11 = ax11.imshow(mask_gt, cmap=cm.jet)
+                mask_gt = tr_mask[i]
+                distance_gt = distance_field[i]
+                # gt_flux = 0.999999 * direction_field[i] / (direction_field[i].norm(p=2, dim=0) + 1e-9)
+                gt_flux = direction_field[i].cpu().numpy()
+                norm_gt = np.sqrt(gt_flux[0, :, :] ** 2 + gt_flux[1, :, :] ** 2)
+                angle_gt = 180 / math.pi * np.arctan2(gt_flux[0, :, :], gt_flux[1, :, :]+0.00001)
 
-            ax22 = fig.add_subplot(346)
-            im22 = ax22.imshow(distance_gt, cmap=cm.jet)
+                ax11 = fig.add_subplot(345)
+                im11 = ax11.imshow(mask_gt, cmap=cm.jet)
 
-            ax33 = fig.add_subplot(347)
-            im33 = ax33.imshow(norm_gt, cmap=cm.jet)
+                ax22 = fig.add_subplot(346)
+                im22 = ax22.imshow(distance_gt, cmap=cm.jet)
 
-            ax44 = fig.add_subplot(348)
-            im44 = ax44.imshow(angle_gt, cmap=cm.jet)
+                ax33 = fig.add_subplot(347)
+                im33 = ax33.imshow(norm_gt, cmap=cm.jet)
 
-            img_show = image[i].permute(1, 2, 0).cpu().numpy()
-            img_show = ((img_show * self.model_config.stds + self.model_config.means) * 255).astype(np.uint8)
-            img_show = np.ascontiguousarray(img_show[:, :, ::-1])
-            shows = []
-            gt = gt_tags[i]
-            gt_idx = np.where(ignore_tags[i] > 0)
-            gt_py = gt[gt_idx[0], :, :]
-            index = torch.where(inds[0] == i)[0]
-            init_py = init_polys[index].detach().cpu().numpy()
+                ax44 = fig.add_subplot(348)
+                im44 = ax44.imshow(angle_gt, cmap=cm.jet)
 
-            image_show = img_show.copy()
-            cv2.drawContours(image_show, init_py.astype(np.int32), -1, (255, 0, 0), 2)
-            cv2.drawContours(image_show, gt_py.astype(np.int32), -1, (0, 255, 255), 2)
-            shows.append(image_show)
-            for py in py_preds:
-                contours = py[index].detach().cpu().numpy()
+                img_show = image[i].permute(1, 2, 0).cpu().numpy()
+                img_show = ((img_show * self.model_config.stds + self.model_config.means) * 255).astype(np.uint8)
+                img_show = np.ascontiguousarray(img_show[:, :, ::-1])
+                shows = []
+                gt = gt_tags[i]
+                gt_idx = np.where(ignore_tags[i] > 0)
+                gt_py = gt[gt_idx[0], :, :]
+                index = torch.where(inds[0] == i)[0]
+                init_py = init_polys[index].detach().cpu().numpy()
+
                 image_show = img_show.copy()
-                cv2.drawContours(image_show, init_py.astype(np.int32), -1, (0, 125, 125), 2)
-                cv2.drawContours(image_show, gt_py.astype(np.int32), -1, (255, 125, 0), 2)
-                cv2.drawContours(image_show, contours.astype(np.int32), -1, (0, 255, 125), 2)
-                if self.model_config.mid == True:
-                    cv2.polylines(image_show, midline.astype(np.int32), False, (125, 255, 0), 2)
+                cv2.drawContours(image_show, init_py.astype(np.int32), -1, (255, 0, 0), 2)
+                cv2.drawContours(image_show, gt_py.astype(np.int32), -1, (0, 255, 255), 2)
                 shows.append(image_show)
+                for py in py_preds:
+                    contours = py[index].detach().cpu().numpy()
+                    image_show = img_show.copy()
+                    cv2.drawContours(image_show, init_py.astype(np.int32), -1, (0, 125, 125), 2)
+                    cv2.drawContours(image_show, gt_py.astype(np.int32), -1, (255, 125, 0), 2)
+                    cv2.drawContours(image_show, contours.astype(np.int32), -1, (0, 255, 125), 2)
+                    if self.model_config.mid == True:
+                        cv2.polylines(image_show, midline.astype(np.int32), False, (125, 255, 0), 2)
+                    shows.append(image_show)
 
-            for idx, im_show in enumerate(shows):
-                axb = fig.add_subplot(3, 4, 9+idx)
-                # axb.set_title('boundary_{}'.format(idx))
-                # axb.set_autoscale_on(True)
-                im11 = axb.imshow(im_show, cmap=cm.jet)
-                # plt.colorbar(im11, shrink=0.5)
+                for idx, im_show in enumerate(shows):
+                    axb = fig.add_subplot(3, 4, 9+idx)
+                    # axb.set_title('boundary_{}'.format(idx))
+                    # axb.set_autoscale_on(True)
+                    im11 = axb.imshow(im_show, cmap=cm.jet)
+                    # plt.colorbar(im11, shrink=0.5)
 
-            plt.savefig(os.path.join(self.logger.log_dir, f'{i}.png'))
-            plt.close(fig)
+                plt.savefig(os.path.join(self.logger.log_dir, f'{i}.png'))
+                plt.close(fig)
+        
+        return loss
     
     def configure_optimizers(self):
         if self.optimizer_config.optim == 'Adam':
@@ -1433,16 +1435,18 @@ class PLBase(lightning.LightningModule):
             )
         if self.optimizer_config.lr_adjust == 'step':
             lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.9)
-        else:
-            lr_scheduler = None
         
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': lr_scheduler,
-                'interval': 'epoch'
+            return {
+                'optimizer': optimizer,
+                'lr_scheduler': {
+                    'scheduler': lr_scheduler,
+                    'interval': 'epoch'
+                }
             }
-        }
+        else:
+            return optimizer
+        
+        
 
     @torch.no_grad()
     def log_images(self, batch, batch_idx):

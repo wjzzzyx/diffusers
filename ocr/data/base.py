@@ -41,10 +41,10 @@ class TextInstance(object):
         self.bottoms = find_bottom(self.points)  # find two bottoms of this Text
         self.e1, self.e2 = find_long_edges(self.points, self.bottoms)  # find two long edge sequence
 
-    def get_sample_point(self, size=None):
+    def get_sample_point(self, size, num_points, approx_factor):
         mask = np.zeros(size, np.uint8)
         cv2.fillPoly(mask, [self.points.astype(np.int32)], color=(1,))
-        control_points = get_sample_point(mask, cfg.num_points, cfg.approx_factor)
+        control_points = get_sample_point(mask, num_points, approx_factor)
 
         return control_points
 
@@ -154,16 +154,16 @@ class TextDataset(object):
         h, w = img.shape[0], img.shape[1]
         mask_zeros = np.zeros(img.shape[:2], np.uint8)
 
-        train_mask = np.ones((h, w), dtype=np.float)
+        train_mask = np.ones((h, w), dtype=float)
         tr_mask = np.zeros((h, w), dtype=np.uint8)
-        weight_matrix = np.zeros((h, w), dtype=np.float)
-        direction_field = np.zeros((2, h, w), dtype=np.float)
-        distance_field = np.zeros((h, w), dtype=np.float)
+        weight_matrix = np.zeros((h, w), dtype=float)
+        direction_field = np.zeros((2, h, w), dtype=float)
+        distance_field = np.zeros((h, w), dtype=float)
         edge_field = np.zeros((h, w), dtype=np.uint8)
 
-        gt_points = np.zeros((self.max_annotation, self.num_points, 2), dtype=np.float)
-        proposal_points = np.zeros((self.max_annotation, self.num_points, 2), dtype=np.float)
-        ignore_tags = np.zeros((self.max_annotation,), dtype=np.int)
+        gt_points = np.zeros((self.max_annotation, self.num_points, 2), dtype=float)
+        proposal_points = np.zeros((self.max_annotation, self.num_points, 2), dtype=float)
+        ignore_tags = np.zeros((self.max_annotation,), dtype=int)
 
         if polygons is None:
             return train_mask, tr_mask, \
@@ -175,8 +175,8 @@ class TextDataset(object):
                 break
             polygon.points[:, 0] = np.clip(polygon.points[:, 0], 1, w - 2)
             polygon.points[:, 1] = np.clip(polygon.points[:, 1], 1, h - 2)
-            gt_points[idx, :, :] = polygon.get_sample_point(size=(h, w))
-            cv2.fillPoly(tr_mask, [polygon.points.astype(np.int)], color=(idx + 1,))
+            gt_points[idx, :, :] = polygon.get_sample_point((h, w), self.num_points, self.approx_factor)
+            cv2.fillPoly(tr_mask, [polygon.points.astype(int)], color=(idx + 1,))
 
             inst_mask = mask_zeros.copy()
             cv2.fillPoly(inst_mask, [polygon.points.astype(np.int32)], color=(1,))

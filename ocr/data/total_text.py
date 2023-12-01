@@ -35,8 +35,8 @@ class TotalText(TextDataset):
         else:
             ignore_list = []
 
-        self.image_root = os.path.join(data_root, 'Images', 'Train' if is_training else 'Test')
-        self.annotation_root = os.path.join(data_root, 'gt', 'Train' if is_training else 'Test')
+        self.image_root = os.path.join(data_root, 'train_image' if mode == 'train' else 'test_image')
+        self.annotation_root = os.path.join(data_root, 'train_label_polygon' if mode == 'train' else 'test_label_polygon')
         self.image_list = os.listdir(self.image_root)
         self.image_list = list(filter(lambda img: img.replace('.jpg', '') not in ignore_list, self.image_list))
         self.annotation_list = ['poly_gt_{}'.format(img_name.replace('.jpg', '')) for img_name in self.image_list]
