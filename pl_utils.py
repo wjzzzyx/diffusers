@@ -370,7 +370,7 @@ def get_callbacks(args, config, lightning_config):
             'Caution: Saving checkpoints every n train steps without deleting. This might require some free space.')
         default_metrics_over_trainsteps_ckpt_dict = {
             'metrics_over_trainsteps_checkpoint':
-                {"target": 'pytorch_lightning.callbacks.ModelCheckpoint',
+                {"target": 'lignthing.pytorch.callbacks.ModelCheckpoint',
                     'params': {
                         "dirpath": os.path.join(args.ckptdir, 'trainstep_checkpoints'),
                         "filename": "{epoch:06}-{step:09}",

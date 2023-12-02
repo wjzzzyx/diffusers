@@ -72,10 +72,10 @@ if __name__ == '__main__':
     )
 
     # set model
-    if pl_config.trainer.max_steps > 0:
-        config.model.params.optimizer_config.num_training_steps = pl_config.trainer.max_steps
+    if trainer.max_steps > 0:
+        config.model.params.optimizer_config.num_training_steps = trainer.max_steps
     else:
-        config.model.params.optimizer_config.num_training_steps = pl_config.trainer.max_epochs * len(train_dataloader)
+        config.model.params.optimizer_config.num_training_steps = trainer.max_epochs * len(train_dataloader)
     pl_model = utils.instantiate_from_config(config.model)
 
     try:
