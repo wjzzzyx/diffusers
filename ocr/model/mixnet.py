@@ -79,7 +79,7 @@ class FSNet(nn.Module):
             channels = next_channels
 
     def forward(self, x):
-        x = self.stem(x) # 64 > H/4, W/4
+        x = self.stem(x)
         x1 = self.steps[0](x)
 
         x1 = self.blocks[0](x1)
@@ -557,7 +557,7 @@ def get_node_feature(cnn_feature, img_poly, ind, h, w):
     # print(img_poly.shape)
     for i in range(batch_size):
         poly = img_poly[ind == i].unsqueeze(0)
-        gcn_feature[ind == i] = torch.nn.functional.grid_sample(cnn_feature[i:i + 1], poly)[0].permute(1, 0, 2)
+        gcn_feature[ind == i] = torch.nn.functional.grid_sample(cnn_feature[i:i + 1], poly).squeeze(0).permute(1, 0, 2)
     return gcn_feature
 
 
@@ -816,13 +816,14 @@ class Evolution(nn.Module):
 
     #     return init_polys, inds, confidences
         
-    def evolve_poly(self, snake, cnn_feature, i_it_poly, ind):
-        num_point = i_it_poly.shape[1]
-        if len(i_it_poly) == 0:
-            return torch.zeros_like(i_it_poly)
+    def evolve_poly(self, snake, cnn_feature, init_poly, ind):
+        num_point = init_poly.shape[1]
+        if len(init_poly) == 0:
+            return torch.zeros_like(init_poly)
         h, w = cnn_feature.size(2)*self.scale, cnn_feature.size(3)*self.scale
-        node_feats = get_node_feature(cnn_feature, i_it_poly, ind, h, w)
-        i_poly = i_it_poly + torch.clamp(snake(node_feats).permute(0, 2, 1), -self.clip_dis, self.clip_dis)[:,:num_point]
+        # node_feats: (num_all_text, feat_dim, num_point), sampled from image feature according to coordinates
+        node_feats = get_node_feature(cnn_feature, init_poly, ind, h, w)
+        i_poly = init_poly + torch.clamp(snake(node_feats).permute(0, 2, 1), -self.clip_dis, self.clip_dis)[:,:num_point]
         if self.training:
             i_poly = torch.clamp(i_poly, 0, w-1)
         else:
@@ -831,6 +832,8 @@ class Evolution(nn.Module):
         return i_poly
 
     def forward(self, embed_feature, input=None, seg_preds=None, switch="gt", embed = None):
+        # init_polys: (num_all_text, num_point, 2)
+        # inds: valid text indexes, (batch index: num_all_text, text in batch index: num_all_text)
         if self.training:
             init_polys, inds, confidences = self.get_boundary_proposal(input=input, seg_preds=seg_preds, switch=switch)
             # TODO sample fix number
@@ -1090,7 +1093,7 @@ class TextLoss(nn.Module):
             py_preds = output_dict["py_preds"]
             inds = output_dict["inds"]
 
-        train_mask = input_dict['train_mask'].float()
+        train_mask = input_dict['train_mask'].float()    # valid region
         tr_mask = input_dict['tr_mask'] > 0
         distance_field = input_dict['distance_field']
         direction_field = input_dict['direction_field']
@@ -1135,7 +1138,7 @@ class TextLoss(nn.Module):
                 'dir_loss': theta*(norm_loss + angle_loss),
                 'norm_loss': theta*norm_loss,
             }
-            return loss_dict
+            return loss, loss_dict
 
         # boundary point loss
         point_loss = self.PolyMatchingLoss(py_preds[1:], gt_points[inds])
