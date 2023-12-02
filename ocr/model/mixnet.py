@@ -1422,6 +1422,13 @@ class PLBase(lightning.LightningModule):
         
         return loss
     
+    def validation_step(self, batch, batch_idx):
+        outputs = self.model(batch)
+        outputs.update(batch)
+        img_show, contours = self.log_images(outputs, batch_idx)
+        outputs['contours'] = contours
+        self.log_results(outputs)
+    
     def configure_optimizers(self):
         if self.optimizer_config.optim == 'Adam':
             optimizer = torch.optim.Adam(
@@ -1445,21 +1452,131 @@ class PLBase(lightning.LightningModule):
             }
         else:
             return optimizer
-        
-        
 
     @torch.no_grad()
     def log_images(self, batch, batch_idx):
         dirname = os.path.join(self.logger.log_dir, 'log_images', mode)
-        image = batch['image'][0].permute(1, 2, 0).cpu().numpy()
-        image = ((image * self.model_config.stds + self.model_config.means) * 255).astype(np.uint8)
-        gt_vis = self.visualize_gt(image, gt_contour, label_tag)
-        show_boundary, heatmap = visualize_detection(image, batch, meta)
+        img_show = batch['image'][0].permute(1, 2, 0).cpu().numpy()
+        img_show = ((img_show * self.model_config.stds + self.model_config.means) * 255).astype(np.uint8)
+        
+        gt_contour = []
+        label_tag = batch['label_tag'][0].int().cpu().numpy()
+        for anno, n_anno in zip(batch['annotation'][0], batch['n_annotation'][0]):
+            if n_anno.item() > 0:
+                gt_contour.append(anno[:n_anno].int().cpu().numpy())
+
+        gt_vis = self.visualize_gt(img_show, gt_contour, label_tag)
+        show_boundary, heatmap = self.visualize_detection(img_show, batch)
         show_map = np.concatenate([heatmap, gt_vis], axis=1)
         show_map = cv2.resize(show_map, (320 * 3, 320))
         im_vis = np.concatenate([show_map, show_boundary], axis=0)
-        cv2.imwrite(os.path.join(dirname, meta['image_id'][0].split('.')[0] + '.jpg'), im_vis)
+        cv2.imwrite(os.path.join(dirname, batch['image_id'][0].split('.')[0] + '.jpg'), im_vis)
 
         contours = batch['py_preds'][-1].int().cpu().numpy()
+        H, W = batch['Height'][0].item(), batch['Width'][0].item()
+        
+        def rescale_result(image, bbox_contours, H, W):
+            ori_H, ori_W = image.shape[:2]
+            image = cv2.resize(image, (W, H))
+            contours = list()
+            for cont in bbox_contours:
+                # if cv2.contourArea(cont) < 300:
+                #     continue
+                cont[:, 0] = (cont[:, 0] * W / ori_W).astype(int)
+                cont[:, 1] = (cont[:, 1] * H / ori_H).astype(int)
+                contours.append(cont)
+            return image, contours
+        
         img_show, contours = rescale_result(img_show, contours, H, W)
 
+        return img_show, contours
+    
+    def visualize_gt(self, image, contours, label_tag):
+        image_show = image.copy()
+        image_show = np.ascontiguousarray(image_show[:, :, ::-1])
+        image_show = cv2.polylines(image_show,
+                                [contours[i] for i, tag in enumerate(label_tag) if tag >0], True, (0, 0, 255), 3)
+        image_show = cv2.polylines(image_show,
+                                [contours[i] for i, tag in enumerate(label_tag) if tag <0], True, (0, 255, 0), 3)
+        show_gt = cv2.resize(image_show, (320, 320))
+        return show_gt
+    
+    def visualize_detection(self, image, output_dict):
+        image_show = image.copy()
+        image_show = np.ascontiguousarray(image_show[:, :, ::-1])
+
+        cls_preds = F.interpolate(output_dict["fy_preds"], scale_factor=self.model_cfg.scale, mode='bilinear')
+        cls_preds = cls_preds[0].detach().cpu().numpy()
+        py_preds = output_dict["py_preds"][1:]
+        init_polys = output_dict["py_preds"][0]
+        shows = []
+        if self.model_cfg.mid:
+            midline = output_dict["midline"]
+
+        init_py = init_polys.detach().cpu().numpy()
+        path = os.path.join(self.logger.log_dir, 'vis', output_dict['image_id'][0].split(".")[0] + "_init.png")
+        im_show0 = image_show.copy()
+        for i, bpts in enumerate(init_py.astype(np.int32)):
+            cv2.drawContours(im_show0, [bpts.astype(np.int32)], -1, (255, 0, 255), 2)
+            for j, pp in enumerate(bpts):
+                if j == 0:
+                    cv2.circle(im_show0, (int(pp[0]), int(pp[1])), 3, (125, 125, 255), -1)
+                elif j == 1:
+                    cv2.circle(im_show0, (int(pp[0]), int(pp[1])), 3, (125, 255, 125), -1)
+                else:
+                    cv2.circle(im_show0, (int(pp[0]), int(pp[1])), 3, (255, 125, 125), -1)
+        cv2.imwrite(path, im_show0)
+
+        for idx, py in enumerate(py_preds):
+            im_show = im_show0.copy()
+            contours = py.detach().cpu().numpy()
+            cv2.drawContours(im_show, contours.astype(np.int32), -1, (0, 255, 255), 2)
+            for ppts in contours:
+                for j, pp in enumerate(ppts):
+                    if j == 0:
+                        cv2.circle(im_show, (int(pp[0]), int(pp[1])), 3, (125, 125, 255), -1)
+                    elif j == 1:
+                        cv2.circle(im_show, (int(pp[0]), int(pp[1])), 3, (125, 255, 125), -1)
+                    else:
+                        cv2.circle(im_show, (int(pp[0]), int(pp[1])), 3, (255, 125, 125), -1)
+            if self.model_config.mid:
+                for ppt in midline:
+                    for pt in ppt:
+                        cv2.circle(im_show, (int(pt[0]), int(pt[1])), 3, (255, 0, 0), -1)
+
+            path = os.path.join(self.logger.log_dir, 'vis', output_dict['image_id'][0].split(".")[0] + "_{}iter.png".format(idx))
+            cv2.imwrite(path, im_show)
+            shows.append(im_show)
+
+        show_img = np.concatenate(shows, axis=1)
+        show_boundary = cv2.resize(show_img, (320 * len(py_preds), 320))
+
+        def heatmap(im_gray):
+            cmap = plt.get_cmap('jet')
+            rgba_img = cmap(255 - im_gray)
+            Hmap = np.delete(rgba_img, 3, 2)
+            # print(Hmap.shape, Hmap.max(), Hmap.min())
+            # cv2.imshow("heat_img", Hmap)
+            # cv2.waitKey(0)
+            return Hmap
+
+        cls_pred = heatmap(np.array(cls_preds[0] * 255, dtype=np.uint8))
+        dis_pred = heatmap(np.array(cls_preds[1] * 255, dtype=np.uint8))
+
+        heat_map = np.concatenate([cls_pred*255, dis_pred*255], axis=1)
+        heat_map = cv2.resize(heat_map, (320 * 2, 320))
+
+        return show_boundary, heat_map
+
+    @torch.no_grad()
+    def log_results(self, batch):
+        contours = np.array(contours).astype(int)
+        contours = np.expand_dims(contours, axis=2)
+        with open(os.path.join(self.logger.log_dir, 'results', batch['image_id'][0].replace('jpg', 'txt'))) as f:
+            for contour in contours:
+                contour = np.stack([contour[:, 0], contour[:, 1]], 1)
+                if cv2.contourArea(contour) <= 0:
+                    continue
+                contour = contour.flatten().astype(str).tolist()
+                contour = ','.join(contour)
+                f.write(contour + '\n')
