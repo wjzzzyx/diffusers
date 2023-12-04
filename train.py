@@ -66,7 +66,7 @@ if __name__ == '__main__':
     val_dataset = utils.instantiate_from_config(config.data.val)
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=config.data.batch_size,
+        batch_size=config.data.val_batch_size,
         shuffle=False,
         num_workers=config.data.num_workers,
     )
