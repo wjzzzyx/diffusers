@@ -1215,7 +1215,7 @@ class PolyMatchingLoss(nn.Module):
                 pidxall[b, i] = pidx
 
         pidxall = torch.from_numpy(np.reshape(pidxall, newshape=(batch_size, -1)))
-        self.register_buffer('feature_id', pidxall.unsqueeze_(2).long().expand(-1, -1, 2))
+        self.register_buffer('feature_id', pidxall.unsqueeze_(2).long().repeat(1, 1, 2))
 
     def match_loss(self, pred, gt):
         batch_size = pred.shape[0]
@@ -1428,7 +1428,14 @@ class PLBase(lightning.LightningModule):
     def validation_step(self, batch, batch_idx):
         outputs = self.model(batch)
         outputs.update(batch)
-        img_show, contours = self.log_images(outputs, batch_idx)
+        img_show, contours = self.log_images(outputs, batch_idx, 'val')
+        outputs['contours'] = contours
+        self.log_results(outputs)
+
+    def test_step(self, batch, batch_idx):
+        outputs = self.model(batch)
+        outputs.update(batch)
+        img_show, contours = self.log_images(outputs, batch_idx, 'test')
         outputs['contours'] = contours
         self.log_results(outputs)
     

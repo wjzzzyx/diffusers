@@ -5,7 +5,7 @@ from scipy import ndimage
 import torch
 
 from ocr.utils.shape import find_bottom, find_long_edges, get_sample_point, split_edge_seqence, vector_sin
-from ocr.transform.mixnet_transforms import Augmentation
+
 
 class TextInstance(object):
     def __init__(self, points, orient, text):
@@ -80,7 +80,6 @@ class TextDataset(object):
 
     def __init__(self, max_annotation, num_points, approx_factor, input_size, means, stds, th_b = 0.35):
         super().__init__()
-        self.transform = Augmentation(size=input_size, mean=means, std=stds)
         self.max_annotation = max_annotation
         self.num_points = num_points
         self.approx_factor = approx_factor

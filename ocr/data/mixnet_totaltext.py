@@ -6,6 +6,7 @@ import scipy.io
 
 from .base import TextDataset, TextInstance
 from ocr.utils import strs
+from ocr.transform.mixnet_transforms import Augmentation, BaseTransform
 
 
 class TotalText(TextDataset):
@@ -27,6 +28,11 @@ class TotalText(TextDataset):
         self.data_root = data_root
         self.mode = mode
         self.load_memory = load_memory
+
+        if mode == 'train':
+            self.transform = Augmentation(size=input_size, mean=means, std=stds)
+        else:
+            self.transform = BaseTransform(size=input_size, mean=means, std=stds)
 
         if ignore_list:
             with open(ignore_list) as f:

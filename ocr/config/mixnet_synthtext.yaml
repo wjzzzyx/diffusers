@@ -39,7 +39,7 @@ data:
   num_workers: 4
   rescale: 255.0
   train:
-    target: ocr.data.total_text.TotalText
+    target: ocr.data.mixnet_totaltext.TotalText
     params:
       data_root: /mnt/sdb/ocr_datasets/total_text
       mode: train
@@ -50,25 +50,25 @@ data:
       means: [0.485, 0.456, 0.406]
       stds: [0.229, 0.224, 0.225]
   val:
-    target: ocr.data.total_text.TotalText
+    target: ocr.data.mixnet_totaltext.TotalText
     params:
       data_root: /mnt/sdb/ocr_datasets/total_text
       mode: val
       max_annotation: 64
       num_points: 20
       approx_factor: 0.004
-      input_size: 640
+      input_size: [640, 960]
       means: [0.485, 0.456, 0.406]
       stds: [0.229, 0.224, 0.225]
   test:
-    target: ocr.data.total_text.TotalText
+    target: ocr.data.mixnet_totaltext.TotalText
     params:
       data_root: /mnt/sdb/ocr_datasets/total_text
       mode: test
       max_annotation: 64
       num_points: 20
       approx_factor: 0.004
-      input_size: 640
+      input_size: [640, 960]
       means: [0.485, 0.456, 0.406]
       stds: [0.229, 0.224, 0.225]
 
