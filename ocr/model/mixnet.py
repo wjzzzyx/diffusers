@@ -1581,14 +1581,15 @@ class PLBase(lightning.LightningModule):
 
     @torch.no_grad()
     def log_results(self, batch):
-        contours = np.array(contours).astype(int)
+        contours = batch['contours']
         if contours == []:
             return
+        contours = np.array(contours).astype(int)
         # contours = np.expand_dims(contours, axis=2)
         os.makedirs(os.path.join(self.logger.log_dir, 'results'), exist_ok=True)
         with open(os.path.join(self.logger.log_dir, 'results', batch['image_id'][0].replace('jpg', 'txt'))) as f:
             for contour in contours:
-                contour = np.stack([contour[:, 0], contour[:, 1]], 1)
+                contour = np.stack([contour[:, 1], contour[:, 0]], 1)
                 if cv2.contourArea(contour) <= 0:
                     continue
                 contour = contour.flatten().astype(str).tolist()
