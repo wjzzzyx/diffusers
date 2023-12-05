@@ -1,3 +1,4 @@
+import cv2
 import math
 import numpy as np
 from PIL import Image
@@ -144,3 +145,80 @@ class RandomResizedCrop():
                 new_instances.append(instance)
         
         return image, new_instances
+
+
+class CenterCrop():
+    def __init__(self, size):
+        if isinstance(size, int):
+            size = [size, size]
+        self.size = size
+    
+    def __call__(self, image, instances):
+        w, h = image.size
+        x1 = (w - self.size[0]) // 2
+        y1 = (h - self.size[1]) // 2
+        x2 = x1 + self.size[0]
+        y2 = y1 + self.size[1]
+
+        image = image.crop((x1, y1, x2, y2))
+
+        new_instances = list()
+        for instance in instances:
+            if instance_in_cropped_region((x1, y1, x2, y2), instance):
+                if instance.polygon is not None:
+                    instance.polygon[:, 0] = np.clip(instance.polygon[:, 0] - x1, 0, self.size[0])
+                    instance.polygon[:, 1] = np.clip(instance.polygon[:, 1] - y1, 0, self.size[1])
+                if instance.mask is not None:
+                    instance.mask = instance.mask[y1:y2, x1:x2]
+                new_instances.append(instance)
+        
+        return image, new_instances
+
+
+class RandomRotation():
+    def __init__(self, degree_range=None, degree_std=None):
+        self.degree_range = degree_range
+        self.degree_std = degree_std
+    
+    def __call__(self, image, instances):
+        if self.degree_range:
+            degree = random.uniform(self.degree_range[0], self.degree_range[1])
+        else:
+            degree = random.gauss(sigma=self.degree_std)
+        
+        w, h = image.size
+        center_x, center_y = w / 2.0, h / 2.0
+        rotated_w = round(w * math.fabs(math.cos(degree)) + h * math.fabs(math.sin(degree)))
+        rotated_h = round(w * math.fabs(math.sin(degree)) + h * math.fabs(math.cos(degree)))
+
+        matrix = cv2.getRotationMatrix2D((center_x, center_y), degree / math.pi * 180, scale=1)
+        matrix[0, 2] += int((rotated_w - w) / 2)
+        matrix[1, 2] += int((rotated_h - h) / 2)
+        image = cv2.warpAffine(image, matrix, (rotated_w, rotated_h))
+
+        for instance in instances:
+            if instance.polygon is not None:
+                instance.polygon = self.rotate_points(instance.polygon, degree, (center_x, center_y))
+                instance.polygon[:, 0] += int((rotated_w - w) / 2)
+                instance.polygon[:, 1] += int((rotated_h - h) / 2)
+            if instance.mask is not None:
+                instance.mask = cv2.warpAffine(instance.mask, matrix, (rotated_w, rotated_h))
+        
+        return image, instances
+    
+    def rotate_points(points, degree, center):
+        center_x, center_y = center
+        x, y = points[:, 0], points[:, 1]
+        center_y = -center_y
+        y = -y
+
+        x = x - center_x
+        y = y - center_y
+
+        x_rot = x * math.cos(degree) - y * math.sin(degree)
+        y_rot = x * math.sin(degree) + y * math.cos(degree)
+
+        x_rot = x_rot + center_x
+        y_rot = - (y_rot + center_y)
+
+        return np.stack([x_rot, y_rot], axis=1)            
