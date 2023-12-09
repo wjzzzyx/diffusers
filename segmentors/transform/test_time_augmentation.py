@@ -35,11 +35,14 @@ class Compose():
 
 
 class ResizeShortestEdge():
-    def __init__(self, size: int):
+    def __init__(self, size: int, image_key = 'image', output_key = 'output'):
         self.size = size
+        self.image_key = image_key
+        self.output_key = output_key
     
     def aug(self, batch):
-        image = batch['image']
+        image = batch[self.image_key]
+        self.origin_image = image
         h, w = image.shape[-2:]
         self.origin_size = (h, w)
         scale = self.size / min(h, w)
@@ -47,18 +50,19 @@ class ResizeShortestEdge():
             new_h, new_w = self.size, round(w * scale)
         else:
             new_h, new_w = round(h * scale), self.size
-        image = F.interpoloate(image, (new_h, new_w), mode='bilinear')
-        batch['image'] = image
+        image = F.interpoloate(image.type(torch.float), (new_h, new_w), mode='bilinear')
+        batch[self.image_key] = image
         return batch
 
     def inference(self, batch, model, *args, **kwargs):
         output = model(batch, *args, **kwargs)
-        batch['output'] = output
+        batch[self.output_key] = output
         return batch
     
     def de_aug(self, batch):
         output = F.interpolate(batch['output'], self.origin_size, mode='bilinear')
-        batch['output'] = output
+        batch[self.output_key] = output
+        batch[self.image_key] = self.origin_image
         return batch
     
     def __call__(self, batch, model, *args, **kwargs):
@@ -71,34 +75,39 @@ class ResizeShortestEdge():
 class PatchwisePredict():
     def __init__(
         self,
-        patch_size: Sequence[int, int],
-        step_size: Sequence[int, int],
+        patch_size: Sequence[int],
+        step_size: Sequence[int],
         use_gaussian: bool,
+        image_key = 'image',
+        output_key = 'output',
     ):
         self.patch_size = patch_size
         self.step_size = step_size
         self.use_gaussian = use_gaussian
         if use_gaussian:
             self._gaussian = self._get_gaussian(patch_size, sigma_scale=1./8)
+        self.image_key = image_key
+        self.output_keys = output_key
     
     def aug(self, batch):
         return batch
     
     def inference(self, batch, model, *args, **kwargs):
-        x = batch.pop('image')
-        image_size = x.shape[2:]
+        origin_image = batch.pop(self.image_key)
+        batch_size = origin_image.size(0)
+        image_size = origin_image.shape[2:]
         num_steps = [math.ceil((i - p) / s) + 1 for i, p, s in zip(image_size, self.patch_size, self.step_size)]
-        actual_step_sizes = [(i - p) / (n - 1) for i, p, n in zip(image_size, self.patch_size, num_steps)]
+        actual_step_sizes = [(i - p) / (n - 1) if n > 1 else 999 for i, p, n in zip(image_size, self.patch_size, num_steps)]
 
         if self.use_gaussian:
             gaussian_importance_map = torch.from_numpy(self._gaussian)
-            gaussian_importance_map = gaussian_importance_map.to(x.device, x.dtype)
+            gaussian_importance_map = gaussian_importance_map.to(origin_image.device, origin_image.dtype)
             add_num_out = gaussian_importance_map
         else:
-            add_num_out = torch.ones(self.patch_size, device=x.device)
+            add_num_out = torch.ones(self.patch_size, device=origin_image.device)
         
-        aggregated_out = torch.zeros(x.size(), device=x.device)
-        aggregated_num_out = torch.zeros(x.size(), device=x.device)
+        aggregated_out = torch.zeros((batch_size, 1, *image_size), device=origin_image.device)
+        aggregated_num_out = torch.zeros((batch_size, 1, *image_size), device=origin_image.device)
 
         for i in range(num_steps[0]):
             y1 = round(actual_step_sizes[0] * i)
@@ -106,8 +115,8 @@ class PatchwisePredict():
             for j in range(num_steps[1]):
                 x1 = round(actual_step_sizes[1] * j)
                 x2 = min(x1 + self.patch_size[1], image_size[1])
-                batch['image'] = x[:, :, y1:y2, x1:x2]
-                out_patch = model(batch, *args, **kwargs)
+                batch['image'] = origin_image[:, :, y1:y2, x1:x2]
+                out_patch = model(batch, *args, **kwargs)['mask_logits']
                 if self.use_gaussian:
                     out_patch *= gaussian_importance_map
                 aggregated_out[:, :, y1:y2, x1:x2] += out_patch
@@ -115,7 +124,8 @@ class PatchwisePredict():
         
         aggregated_out /= aggregated_num_out
 
-        batch['output'] = aggregated_out
+        batch[self.image_key] = origin_image
+        batch[self.output_key] = aggregated_out
         return batch
     
     def de_aug(self, batch):
