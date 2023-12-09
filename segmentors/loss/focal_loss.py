@@ -21,7 +21,7 @@ def focal_loss(
     Returns:
         loss
     """
-    eps = 1e-4
+    eps = 1e-6
     prob = F.softmax(logits, dim=1)
     prob_gt = torch.gather(prob, 1, targets.unsqueeze(1)).squeeze(1)    # (B, H, W)
     logprob_gt = torch.log(prob_gt + eps)
@@ -56,13 +56,13 @@ def binary_focal_loss(
         pos_weight: weight for the positive class between [0, 1]
         reduction: choices in ('mean', 'sum', 'none')
     """
-    eps = 1e-4
+    eps = 1e-6
     prob = F.sigmoid(logits)
     prob = torch.clamp(prob, eps, 1.0 - eps)
 
     pos_loss = - pos_weight * torch.pow(1 - prob, gamma).detach() * F.logsigmoid(logits)
     neg_loss = - (1 - pos_weight) * torch.pow(prob, gamma).detach() * F.logsigmoid(-logits)
-    loss = torch.where(targets, pos_loss, neg_loss)
+    loss = torch.where(targets == 1, pos_loss, neg_loss)
 
     if reduction == 'mean':
         return loss.mean()
