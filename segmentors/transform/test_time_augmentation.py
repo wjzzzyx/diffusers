@@ -60,7 +60,7 @@ class ResizeShortestEdge():
         return batch
     
     def de_aug(self, batch):
-        output = F.interpolate(batch['output'], self.origin_size, mode='bilinear')
+        output = F.interpolate(batch[self.output_key], self.origin_size, mode='bilinear')
         batch[self.output_key] = output
         batch[self.image_key] = self.origin_image
         return batch
@@ -87,11 +87,12 @@ class PatchwisePredict():
         if use_gaussian:
             self._gaussian = self._get_gaussian(patch_size, sigma_scale=1./8)
         self.image_key = image_key
-        self.output_keys = output_key
+        self.output_key = output_key
     
     def aug(self, batch):
         return batch
     
+    @torch.no_grad()
     def inference(self, batch, model, *args, **kwargs):
         origin_image = batch.pop(self.image_key)
         batch_size = origin_image.size(0)
@@ -100,9 +101,8 @@ class PatchwisePredict():
         actual_step_sizes = [(i - p) / (n - 1) if n > 1 else 999 for i, p, n in zip(image_size, self.patch_size, num_steps)]
 
         if self.use_gaussian:
-            gaussian_importance_map = torch.from_numpy(self._gaussian)
-            gaussian_importance_map = gaussian_importance_map.to(origin_image.device, origin_image.dtype)
-            add_num_out = gaussian_importance_map
+            self._gaussian = self._gaussian.to(origin_image.device, origin_image.dtype)
+            add_num_out = self._gaussian
         else:
             add_num_out = torch.ones(self.patch_size, device=origin_image.device)
         
@@ -115,10 +115,10 @@ class PatchwisePredict():
             for j in range(num_steps[1]):
                 x1 = round(actual_step_sizes[1] * j)
                 x2 = min(x1 + self.patch_size[1], image_size[1])
-                batch['image'] = origin_image[:, :, y1:y2, x1:x2]
-                out_patch = model(batch, *args, **kwargs)['mask_logits']
+                batch[self.image_key] = origin_image[:, :, y1:y2, x1:x2]
+                out_patch = model(batch, *args, **kwargs)[self.output_key]
                 if self.use_gaussian:
-                    out_patch *= gaussian_importance_map
+                    out_patch *= self._gaussian
                 aggregated_out[:, :, y1:y2, x1:x2] += out_patch
                 aggregated_num_out[:, :, y1:y2, x1:x2] += add_num_out
         
@@ -144,4 +144,5 @@ class PatchwisePredict():
         gaussian_importance_map = scipy.ndimage.filters.gaussian_filter(temp, sigma, 0, mode='constant', cval=0)
         gaussian_importance_map = gaussian_importance_map / np.max(gaussian_importance_map)
         gaussian_importance_map[gaussian_importance_map == 0] = gaussian_importance_map[gaussian_importance_map != 0].min()
+        gaussian_importance_map = torch.from_numpy(gaussian_importance_map)
         return gaussian_importance_map
