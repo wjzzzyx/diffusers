@@ -390,7 +390,7 @@ class PLBase(lightning.LightningModule):
 
     @torch.no_grad()
     def log_image(self, batch, batch_idx, mode):
-        dirname = os.path.join(self.logger.log_dir, 'log_images', mode)
+        dirname = os.path.join(self.logger.save_dir, 'log_images', mode)
         os.makedirs(dirname, exist_ok=True)
         for key in batch.keys():
             image_t = batch[key].permute(0, 2, 3, 1).squeeze(-1)
