@@ -49,7 +49,7 @@ class BinaryTverskyLoss(nn.Module):
 
 
 class TverskyLoss(nn.Module):
-    def __init__(self, alpha=0.5, beta=0.5, weight=None, reduction='mean'):
+    def __init__(self, alpha=0.5, beta=0.5, class_weight=None, reduction='mean'):
         """
         Args:
             alpha: controls the penalty for false positives. Larger alpha, fewer false positives.
@@ -60,7 +60,7 @@ class TverskyLoss(nn.Module):
         super().__init__()
         self.alpha = alpha
         self.beta = beta
-        self.weight = weight
+        self.class_weight = class_weight
         self.reduction = reduction
     
     def forward(self, logits, targets):
@@ -74,7 +74,7 @@ class TverskyLoss(nn.Module):
         for c in range(num_class):
             loss.append(binary_tversky_loss(logits[:, c], (targets == c), self.alpha, self.beta, self.reduction))
         loss = torch.stack(loss, dim=1)
-        loss = loss * self.weight
+        loss = loss * self.class_weight
 
         if self.reduction == 'none':
             return loss    # (B,)
