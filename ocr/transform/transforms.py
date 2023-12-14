@@ -1,7 +1,8 @@
+import albumentations as A
 import cv2
 import math
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 import random
 import shapely.geometry
 from typing import Union, List
@@ -47,6 +48,104 @@ class Resize():
         return image, instances
 
 
+class ResizeShortestEdge():
+    def __init__(self, size: int):
+        self.size = size
+    
+    def __call__(self, image, instances):
+        w, h = image.size
+        scale = self.size / min(h, w)
+        if h < w:
+            new_h, new_w = self.size, round(w * scale)
+        else:
+            new_h, new_w = round(h * scale), self.size
+        
+        image = image.resize((new_w, new_h), resample=Image.BICUBIC)
+        
+        for instance in instances:
+            if instance.polygon is not None:
+                instance.polygon = instance.polygon * np.array([scale, scale])
+            if instance.mask is not None:
+                instance.mask = instance.mask.resize((new_w, new_h), resample=Image.NEAREST)
+        
+        return image, instances
+
+
+class RandomResizeShortestEdge():
+    def __init__(self, min_size, max_size):
+        self.min_size = min_size
+        self.max_size = max_size
+    
+    def __call__(self, image, instances):
+        size = random.randint(self.min_size, self.max_size)
+
+        w, h = image.size
+        scale = size / min(h, w)
+        if h < w:
+            new_h, new_w = size, round(w * scale)
+        else:
+            new_h, new_w = round(h * scale), size
+        
+        image = image.resize((new_w, new_h), resample=Image.BICUBIC)
+        
+        for instance in instances:
+            if instance.polygon is not None:
+                instance.polygon = instance.polygon * np.array([scale, scale])
+            if instance.mask is not None:
+                instance.mask = instance.mask.resize((new_w, new_h), resample=Image.NEAREST)
+        
+        return image, instances
+
+
+class ResizeLongestEdge():
+    def __init__(self, size: int):
+        self.size = size
+    
+    def __call__(self, image, instances):
+        w, h = image.size
+        scale = self.size / max(h, w)
+        if h < w:
+            new_h, new_w = round(h * scale), self.size
+        else:
+            new_h, new_w = self.size, round(w * scale)
+        
+        image = image.resize((new_w, new_h), resample=Image.BICUBIC)
+        
+        for instance in instances:
+            if instance.polygon is not None:
+                instance.polygon = instance.polygon * np.array([scale, scale])
+            if instance.mask is not None:
+                instance.mask = instance.mask.resize((new_w, new_h), resample=Image.NEAREST)
+        
+        return image, instances
+
+
+class RandomResizeLongestEdge():
+    def __init__(self, min_size, max_size):
+        self.min_size = min_size
+        self.max_size = max_size
+    
+    def __call__(self, image, instances):
+        size = random.randint(self.min_size, self.max_size)
+
+        w, h = image.size
+        scale = size / max(h, w)
+        if h < w:
+            new_h, new_w = round(h * scale), size
+        else:
+            new_h, new_w = size, round(w * scale)
+        
+        image = image.resize((new_w, new_h), resample=Image.BICUBIC)
+        
+        for instance in instances:
+            if instance.polygon is not None:
+                instance.polygon = instance.polygon * np.array([scale, scale])
+            if instance.mask is not None:
+                instance.mask = instance.mask.resize((new_w, new_h), resample=Image.NEAREST)
+        
+        return image, instances
+
+
 class RandomCrop():
     """ Crop an image at a random location with given size. """
     def __init__(self, size: Union[int, List], instance_retain_iou=0.1, pad_if_needed=False):
@@ -70,7 +169,7 @@ class RandomCrop():
         x1 = random.randint(0, w - self.size[0])
         y1 = random.randint(0, h - self.size[1])
         x2 = x1 + self.size[0]
-        y2 = y1 + self.size[0]
+        y2 = y1 + self.size[1]
         image = image.crop((x1, y1, x2, y2))
 
         new_instances = list()
@@ -221,4 +320,83 @@ class RandomRotation():
         x_rot = x_rot + center_x
         y_rot = - (y_rot + center_y)
 
-        return np.stack([x_rot, y_rot], axis=1)            
+        return np.stack([x_rot, y_rot], axis=1)
+
+
+class RandomContrast():
+    def __init__(self, min_intensity, max_intensity):
+        self.min_intensity = min_intensity
+        self.max_intensity = max_intensity
+    
+    def __call__(self, image, instances):
+        w = random.uniform(self.min_intensity, self.max_intensity)
+
+        image_np = np.array(image)
+        has_alpha = False
+        if image_np.shape[2] == 4:
+            has_alpha = True
+            alpha = image_np[:, :, -1]
+            image_np = image_np[:, :, :-1]
+        image_np = image_np.mean() * (1 - w) + image_np * w
+        image_np = np.clip(image_np, 0, 255).astype(np.uint8)
+        if has_alpha:
+            image_np = np.concatenate((image_np, alpha[:, :, None]), axis=2)
+
+        return Image.fromarray(image_np), instances
+
+
+class RandomBrightness():
+    def __init__(self, min_intensity, max_intensity):
+        self.min_intensity = min_intensity
+        self.max_intensity = max_intensity
+    
+    def __call__(self, image, instances):
+        w = random.uniform(self.min_intensity, self.max_intensity)
+
+        image = ImageEnhance.Brightness(image).enhance(w)
+
+        return image, instances
+
+
+class RandomLighting():
+    def __init__(self, std):
+        self.std = std
+        self.eigen_vecs = np.array(
+            [[-0.5675, 0.7192, 0.4009], [-0.5808, -0.0045, -0.8140], [-0.5836, -0.6948, 0.4203]]
+        )
+        self.eigen_vals = np.array([0.2175, 0.0188, 0.0045])
+    
+    def __call__(self, image, instances):
+        weights = np.random.normal(scale=self.std, size=3)
+
+        image_np = np.array(image)
+        image_np = image_np + self.eigen_vecs.dot(weights * self.eigen_vals)
+        image_np = np.clip(image_np, 0, 255).astype(np.uint8)
+        image = Image.fromarray(image_np)
+
+        return image, instances
+
+
+class RandomHueSaturationValue():
+    def __init__(self, hue_shift_limit, sat_shift_limit, val_shift_limit, p):
+        self.aug = A.HueSaturationValue(hue_shift_limit, sat_shift_limit, val_shift_limit, p=p)
+    
+    def __call__(self, image, instances):
+        image_np = np.array(image)
+        image_np = self.aug(image=image_np)['image']
+        image = Image.fromarray(image_np)
+        return image, instances
+
+
+class RandomBlur():
+    def __init__(self, kernel_size, p):
+        self.aug = A.OneOf([
+            A.Blur(blur_limit=kernel_size, p=1),
+            A.MotionBlur(blur_limit=kernel_size, p=1)
+        ], p=p)
+    
+    def __call__(self, image, instances):
+        image_np = np.array(image)
+        image_np = self.aug(image=image_np)['image']
+        image = Image.fromarray(image_np)
+        return image, instances
