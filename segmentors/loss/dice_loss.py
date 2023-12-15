@@ -64,3 +64,35 @@ class DiceLoss(nn.Module):
             targets: (B, C, H, W) soft class indexes in [0, 1]
         """
         return dice_loss(logits, targets, self.class_weight, self.reduction)
+
+
+def generalized_dice_loss(logits, targets, reduction = 'mean'):
+    batch_size, num_class = logits.size(0), logits.size(1)
+    preds = logits.sigmoid().view(batch_size, num_class, -1)
+    targets = targets.view(batch_size, num_class, -1)
+    weights = 1 / targets.sum(dim=-1) ** 2
+    numerator = (preds + targets - torch.abs(preds - targets)).sum(-1)
+    denominator = (preds + targets).sum(-1)
+    weighted_dice = (weights * numerator).sum(dim=-1) / (weights * denominator).sum(dim=-1)
+    loss = 1 - weighted_dice    # shape (B,)
+
+    if reduction == 'none':
+        return loss
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        return loss.mean()
+
+
+class GeneralizedDiceLoss(nn.Module):
+    "Multi-class Dice loss for imbalanced classes. From https://arxiv.org/pdf/1707.03237.pdf."
+    def __init__(self, reduction = 'mean'):
+        self.reduction = reduction
+    
+    def forward(self, logits, targets):
+        """
+        Args:
+            logits: (B, C, H, W) unnormalized logits output from the model
+            targets: (B, C, H, W) soft class indexes in [0, 1]
+        """
+        return generalized_dice_loss(logits, targets, self.reduction)
