@@ -12,7 +12,7 @@ from typing import Any, Type, Optional, Dict, List, Tuple
 from .sam import PatchEmbed, Block, LayerNorm2d, MLP, PromptEncoder, TwoWayTransformer
 from .sam_hq import ImageEncoderViT
 from segmentors import metrics
-from segmentors.loss import pointwise_bce_dice
+from segmentors.loss import pointwise_bce_dice, focal_loss
 
 
 class MaskDecoderNoPrompt(nn.Module):
@@ -304,17 +304,22 @@ class SamNoPrompt(nn.Module):
 
 
 class PLBase(lightning.LightningModule):
-    def __init__(self, model_config, optimizer_config, ckpt_path=None):
+    def __init__(self, model_config, loss_config, optimizer_config, metric_config, ckpt_path=None):
         super().__init__()
         self.model_config = model_config
+        self.loss_config = loss_config
         self.optimizer_config = optimizer_config
+        self.metric_config = metric_config
 
         self.model = SamNoPrompt(model_config)
-        self.loss_fn = pointwise_bce_dice.PointwiseBCEDiceLoss(
-            model_config.loss.oversample_ratio, model_config.loss.importance_sample_ratio
+        self.loss_fn1 = pointwise_bce_dice.PointwiseBCEDiceLoss(
+            loss_config.oversample_ratio, loss_config.importance_sample_ratio
         )
-        self.metric_iou = BinaryJaccardIndex(threshold=0.5)
-        self.metric_boundary_iou = metrics.BoundaryJaccardIndex()
+        self.loss_fn2 = focal_loss.BinaryFocalLoss(
+            loss_config.gamma, loss_config.pos_weight
+        )
+        self.metric_ious = nn.ModuleList([BinaryJaccardIndex(threshold=0.5) for _ in range(metric_config.num_valsets)])
+        self.metric_boundary_ious = nn.ModuleList([metrics.BoundaryJaccardIndex() for _ in range(metric_config.num_valsets)])
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
@@ -330,7 +335,10 @@ class PLBase(lightning.LightningModule):
         outputs = self.model(batch, multimask_output=False)
         pred_masks = outputs['low_res_logits_hq']
         label_masks = batch['mask']
-        loss, logdict = self.loss_fn(pred_masks, label_masks)
+        loss1, logdict1 = self.loss_fn1(pred_masks, label_masks)
+        loss2, logdict2 = self.loss_fn2(outputs['mask_logits'], label_masks)
+        loss = loss1 + loss2 * self.loss_config.weight_focal
+        logdict = logdict1 | logdict2
         logdict = {f'train/{k}': v for k, v in logdict.items()}
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
 
@@ -343,23 +351,23 @@ class PLBase(lightning.LightningModule):
 
         return loss
     
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         outputs = self.model(batch, multimask_output=False)
         pred_masks = (outputs['mask_logits'] > 0).type(torch.uint8)
         label_masks = batch['mask']
-        self.metric_iou.update(pred_masks, label_masks)
-        self.metric_boundary_iou.update(pred_masks, label_masks)
-        self.log('val/iou', self.metric_iou)
-        self.log('val/boundary_iou', self.metric_boundary_iou)
+        self.metric_ious[dataloader_idx].update(pred_masks, label_masks)
+        self.metric_boundary_ious[dataloader_idx].update(pred_masks, label_masks)
+        self.log('val/iou', self.metric_ious[dataloader_idx])
+        self.log('val/boundary_iou', self.metric_boundary_ious[dataloader_idx])
     
-    def test_step(self, batch, batch_idx):
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
         outputs = self.model(batch, multimask_output=False)
         pred_masks = (outputs['mask_logits'] > 0).type(torch.uint8)
         label_masks = batch['mask']
-        self.metric_iou.update(pred_masks, label_masks)
-        self.metric_boundary_iou.update(pred_masks, label_masks)
-        self.log('test/iou', self.metric_iou)
-        self.log('test/boundary_iou', self.metric_boundary_iou)
+        self.metric_ious[dataloader_idx].update(pred_masks, label_masks)
+        self.metric_boundary_ious[dataloader_idx].update(pred_masks, label_masks)
+        self.log('test/iou', self.metric_ious[dataloader_idx])
+        self.log('test/boundary_iou', self.metric_boundary_ious[dataloader_idx])
 
         if batch_idx % 10 == 0 and self.global_rank == 0:
             self.log_image(

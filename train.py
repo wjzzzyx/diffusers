@@ -63,13 +63,15 @@ if __name__ == '__main__':
         num_workers=config.data.num_workers,
         pin_memory=True,
     )
-    val_dataset = utils.instantiate_from_config(config.data.val)
-    val_dataloader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=config.data.val_batch_size,
-        shuffle=False,
-        num_workers=config.data.num_workers,
-    )
+    val_datasets = [utils.instantiate_from_config(cfg) for cfg in config.data.val]
+    val_dataloaders = [
+        torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=config.data.val_batch_size,
+            shuffle=False,
+            num_workers=config.data.num_workers,
+        ) for val_dataset in val_datasets
+    ]
 
     # set model
     if trainer.max_steps > 0:
@@ -79,7 +81,7 @@ if __name__ == '__main__':
     pl_model = utils.instantiate_from_config(config.model)
 
     try:
-        trainer.fit(pl_model, train_dataloader, val_dataloader)
+        trainer.fit(pl_model, train_dataloader, val_dataloaders)
     except Exception:
         # melk()
         raise

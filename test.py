@@ -20,13 +20,15 @@ if __name__ == '__main__':
     config = OmegaConf.merge(*configs)
     pl_config = config.pop('lightning')
 
-    test_dataset = utils.instantiate_from_config(config.data.test)
-    test_dataloader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=config.data.batch_size,
-        shuffle=False,
-        num_workers=config.data.num_workers,
-    )
+    test_datasets = [utils.instantiate_from_config(cfg) for cfg in config.data.test]
+    test_dataloaders = [
+        torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=config.data.batch_size,
+            shuffle=False,
+            num_workers=config.data.num_workers,
+        ) for test_dataset in test_datasets
+    ]
 
     pl_model = utils.instantiate_from_config(config.model)
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
@@ -39,4 +41,4 @@ if __name__ == '__main__':
         logger=logger,
     )
 
-    trainer.test(pl_model, test_dataloader)
+    trainer.test(pl_model, test_dataloaders)

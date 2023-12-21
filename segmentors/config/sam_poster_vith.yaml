@@ -1,0 +1,76 @@
+exp_name: debug
+
+model:
+  seed: 42
+  target: segmentors.models.sam_hq_noprompt.PLBase
+  params:
+    model_config:
+      image_size: 1024
+      encoder_depth: 32
+      encoder_embed_dim: 1280
+      encoder_num_heads: 16
+      vit_patch_size: 16
+      encoder_global_attn_indexes: [7, 15, 23, 31]
+      prompt_embed_dim: 256
+      pretrained: pretrained/sam_vit_h_4b8939.pth
+    
+    loss_config:
+        oversample_ratio: 3.0
+        importance_sample_ratio: 0.75
+        gamma: 2
+        pos_weight: 0.9
+        weight_focal: 10 
+    
+    optimizer_config:
+      learning_rate: 0.001
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_weight_decay: 0.0
+      adam_epsilon: 0.00000001
+      lr_drop_epoch: 50000
+    
+    metric_config:
+      num_valsets: 4
+
+data:
+  batch_size: 4
+  num_workers: 4
+  train:
+    target: segmentors.data.poster.PosterDataset
+    params:
+      data_dir:
+      sub_dirs:
+      mode: train
+  val:
+    target: segmentors.data.poster.PosterDataset
+    params:
+      data_dir:
+      sub_dirs:
+      mode: val
+  test:
+    target: segmentors.data.poster.PosterDataset
+    params:
+      data_dir:
+      sub_dirs:
+      mode: test
+
+lightning:
+  callbacks:
+    checkpoint_callback:
+      params:
+        # monitor: 'val/loss'
+        save_top_k: -1
+        # mode: min
+        every_n_epochs: 50
+  
+  trainer:
+    accelerator: gpu
+    devices: 8
+    benchmark: True
+    accumulate_grad_batches: 1
+    max_steps: 100000
+    gradient_clip_val: 1.0
+    precision: '16'
+    profiler: simple
+    # limit_train_batches: 100
+    # limit_val_batches: 10
