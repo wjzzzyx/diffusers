@@ -27,3 +27,19 @@ model:
     num_train_timesteps: 1000
     trained_betas: null
     variance_type: fixed_small
+
+data:
+  batch_size: 4
+  num_workers: 0
+  val:
+    target: diffusers.data.null_image.dataset.NullImageDataset
+    params:
+      len: 100
+  test:
+    target: diffusers.data.null_image.dataset.NullImageDataset
+    params:
+      len: 100
+  predict:
+    target: diffusers.data.null_image.dataset.NullImageDataset
+    params:
+      len: 100
