@@ -10,12 +10,12 @@ def pipeline_ddpm(
     num_inference_steps: int,
     generator = None
 ):
-    image = torch.randn((batch_size, model.in_channels, *image_shape), generator=generator)
+    image = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
 
     sampler.set_timesteps(num_inference_steps)
 
     for t in range(sampler.timesteps):
-        output = model(image, t)
+        output = model(image, t, sampler)
         image = sampler.step(output, t, image, generator=generator)
     
     return image

@@ -7,7 +7,7 @@ from .unet_2d_blocks import UNetMidBlock2D, get_down_block, get_up_block
 from .utils import register_to_config
 
 
-class UNet2D():
+class UNet2D(nn.Module):
     @register_to_config
     def __init__(
         self,
@@ -39,8 +39,19 @@ class UNet2D():
         num_train_timesteps: Optional[int] = None,
     ):
         super().__init__()
-
+        self.sample_size = sample_size
         time_embed_dim = block_out_channels[0] * 4
+
+        # Check inputs
+        if len(down_block_types) != len(up_block_types):
+            raise ValueError(
+                f"Must provide the same number of `down_block_types` as `up_block_types`. `down_block_types`: {down_block_types}. `up_block_types`: {up_block_types}."
+            )
+
+        if len(block_out_channels) != len(down_block_types):
+            raise ValueError(
+                f"Must provide the same number of `block_out_channels` as `down_block_types`. `block_out_channels`: {block_out_channels}. `down_block_types`: {down_block_types}."
+            )
 
         self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
 
@@ -140,16 +151,45 @@ class UNet2D():
         self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
     
     def forward(self, sample: torch.Tensor, timestep: torch.Tensor, class_labels = None):
-        t_emb = self.time_proj(timestep)
+        # 0. center input if necessary
+        if self.config.center_input_sample:
+            sample = 2 * sample - 1.0
+
+        # 1. time
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            timesteps = torch.tensor([timesteps], dtype=torch.long, device=sample.device)
+        elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timesteps * torch.ones(sample.shape[0], dtype=timesteps.dtype, device=timesteps.device)
+
+        t_emb = self.time_proj(timesteps)
+
+        # timesteps does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
+        t_emb = t_emb.to(dtype=self.dtype)
         emb = self.time_embedding(t_emb)
 
         if self.class_embedding is not None:
-            class_emb = self.class_embedding(class_labels)
+            if class_labels is None:
+                raise ValueError("class_labels should be provided when doing class conditioning")
+
+            if self.config.class_embed_type == "timestep":
+                class_labels = self.time_proj(class_labels)
+
+            class_emb = self.class_embedding(class_labels).to(dtype=self.dtype)
             emb = emb + class_emb
-        
+        elif self.class_embedding is None and class_labels is not None:
+            raise ValueError("class_embedding needs to be initialized in order to use class conditioning")
+
+        # 2. pre-process
         skip_sample = sample
         sample = self.conv_in(sample)
 
+        # 3. down
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "skip_conv"):
@@ -160,9 +200,11 @@ class UNet2D():
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
 
             down_block_res_samples += res_samples
-        
+
+        # 4. mid
         sample = self.mid_block(sample, emb)
 
+        # 5. up
         skip_sample = None
         for upsample_block in self.up_blocks:
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
@@ -172,18 +214,17 @@ class UNet2D():
                 sample, skip_sample = upsample_block(sample, res_samples, emb, skip_sample)
             else:
                 sample = upsample_block(sample, res_samples, emb)
-        
+
+        # 6. post-process
         sample = self.conv_norm_out(sample)
         sample = self.conv_act(sample)
         sample = self.conv_out(sample)
 
         if skip_sample is not None:
             sample += skip_sample
-        
+
         if self.config.time_embedding_type == "fourier":
             timesteps = timesteps.reshape((sample.shape[0], *([1] * len(sample.shape[1:]))))
             sample = sample / timesteps
-        
+
         return sample
-
-

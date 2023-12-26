@@ -1,4 +1,6 @@
+import collections
 import lightning
+import numpy as np
 import os
 from PIL import Image
 import torch
@@ -12,11 +14,20 @@ from diffusers.pipeline import uncond_image_gen
 
 class DDPM(nn.Module):
     def __init__(self, model_config):
+        super().__init__()
         self.unet = unet_2d.UNet2D(model_config.unet)
-        self.prediction_type == model_config.prediction_type
+        self.prediction_type = model_config.prediction_type
+        if 'pretrained' in model_config:
+            ckpt = torch.load(model_config.pretrained, map_location='cpu')
+            self._convert_deprecated_attention_blocks(ckpt)
+            self.unet.load_state_dict(ckpt)
+    
+    @property
+    def device(self):
+        return self.unet.conv_in.weight.device
     
     def forward(self, xt, t, sampler):
-        alpha_cumprod_t = self.alphas_cumprod[t]
+        alpha_cumprod_t = sampler.alphas_cumprod[t]
 
         output = self.unet(xt, t)
         # epsilon, x0
@@ -34,9 +45,20 @@ class DDPM(nn.Module):
             'sample': sample,
         }
 
+    def _convert_deprecated_attention_blocks(self, state_dict: collections.OrderedDict):
+        for key in list(state_dict.keys()):
+            if 'attention' in key and 'query' in key:
+                state_dict[key.replace('.query.', '.to_q.')] = state_dict.pop(key)
+            if 'attention' in key and 'key' in key:
+                state_dict[key.replace('.key.', '.to_k.')] = state_dict.pop(key)
+            if 'attention' in key and 'value' in key:
+                state_dict[key.replace('.value.', '.to_v.')] = state_dict.pop(key)
+            if 'attention' in key and 'proj_attn' in key:
+                state_dict[key.replace('.proj_attn.', '.to_out.0.')] = state_dict.pop(key)
+
 
 class PLBase(lightning.LightningModule):
-    def __init__(self, model_config, sampler_config, ema_config, optimizer_config, ckpt_path=None):
+    def __init__(self, model_config, sampler_config, ema_config=None, optimizer_config=None, ckpt_path=None):
         super().__init__()
         self.model_config = model_config
         self.sampler_config = sampler_config
@@ -74,14 +96,15 @@ class PLBase(lightning.LightningModule):
     
     def predict_step(self, batch, batch_idx):
         batch_size = len(batch['fname'])
-        image_shape = self.model.unet.config.sample_size
+        in_channels = self.model.unet.config.in_channels
+        image_size = self.model.unet.config.sample_size
         samples = uncond_image_gen.pipeline_ddpm(
-            self.model, self.sampler, batch_size, image_shape, num_inference_steps=20
+            self.model, self.sampler, batch_size, [in_channels, image_size, image_size], num_inference_steps=1000
         )
         samples = (samples + 1) / 2
         log_image_dict = {
             'image': samples,
-            'fname': batch['fname'],
+            'index': batch['index'],
         }
         log_keys = ['image']
         self.log_image(log_image_dict, log_keys, batch_idx, mode='predict')
@@ -92,11 +115,12 @@ class PLBase(lightning.LightningModule):
         Args:
             batch: dictionary, key: str -> value: tensor
         """
-        dirname = os.path.join(self.logger.save_dir, 'log_images', mode)
+        dirname = os.path.join(self.trainer.default_root_dir, 'log_images', mode)
         os.makedirs(dirname, exist_ok=True)
         for key in keys:
             image_t = batch[key].permute(0, 2, 3, 1).squeeze(-1)
             image_np = image_t.detach().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
             for i in range(image_np.shape[0]):
-                filename = f"{os.path.splitext(batch['fname'][i])[0]}_{key}.png"
+                filename = f"{batch['index'][i]}_{key}.png"
                 Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))

@@ -13,6 +13,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=str, metavar='FILE', help='Path to the checkpoint.')
     parser.add_argument('--config', metavar='FILE', help='Config file for predict.')
+    parser.add_argument('--logdir', metavar='DIR', help='Log dir for prediction outputs.')
     args = parser.parse_args()
 
     if args.checkpoint:
@@ -22,7 +23,7 @@ if __name__ == '__main__':
         config = OmegaConf.merge(*configs)
     else:
         config = OmegaConf.load(args.config)
-    pl_config = config.pop('lightning')
+    pl_config = config.pop('lightning', None)
     
     test_dataset = utils.instantiate_from_config(config.data.predict)
     test_dataloader = torch.utils.data.DataLoader(
@@ -37,12 +38,13 @@ if __name__ == '__main__':
         checkpoint = torch.load(args.checkpoint, map_location='cpu')
         pl_model.load_state_dict(checkpoint['state_dict'])
     
-    logger = pl_utils.get_logger(args, pl_config)
+    # logger = pl_utils.get_logger(args, pl_config)
     trainer = pl.Trainer(
         accelerator='gpu',
         devices=1,
         precision='16-mixed',
-        logger=logger,
+        logger=False,
+        default_root_dir=args.logdir,
     )
 
     trainer.predict(pl_model, test_dataloader)
