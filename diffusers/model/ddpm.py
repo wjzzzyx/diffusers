@@ -8,8 +8,7 @@ import torch.nn as nn
 
 from . import ema
 from .modules import unet_2d
-from diffusers.sampler import sample_ddpm
-from diffusers.pipeline import uncond_image_gen
+import utils
 
 
 class DDPM(nn.Module):
@@ -26,9 +25,7 @@ class DDPM(nn.Module):
     def device(self):
         return self.unet.conv_in.weight.device
     
-    def forward(self, xt, t, sampler):
-        alpha_cumprod_t = sampler.alphas_cumprod[t]
-
+    def forward(self, xt, t, alpha_cumprod_t):
         output = self.unet(xt, t)
         # epsilon, x0
         if self.prediction_type == 'epsilon':
@@ -77,12 +74,7 @@ class PLBase(lightning.LightningModule):
                 power=ema_config.power,
             )
         
-        self.sampler = sample_ddpm.DDPMSampler(
-            num_train_steps=sampler_config.num_train_steps,
-            beta_start=sampler_config.beta_start,
-            beta_end=sampler_config.beta_end,
-            beta_schedule=sampler_config.beta_schedule,
-        )
+        self.sampler = utils.instantiate_from_config(sampler_config)
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
@@ -98,9 +90,7 @@ class PLBase(lightning.LightningModule):
         batch_size = len(batch['fname'])
         in_channels = self.model.unet.config.in_channels
         image_size = self.model.unet.config.sample_size
-        samples = uncond_image_gen.pipeline_ddpm(
-            self.model, self.sampler, batch_size, [in_channels, image_size, image_size], num_inference_steps=1000
-        )
+        samples = self.sampler.sample(self.model, batch_size, [in_channels, image_size, image_size])
         samples = (samples + 1) / 2
         log_image_dict = {
             'image': samples,

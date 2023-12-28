@@ -1,5 +1,5 @@
 import torch
-from typing import Dict
+from typing import Dict, Sequence
 
 from . import schedule
 
@@ -45,6 +45,13 @@ class DDIMSampler():
         sample_next = cur_mean + variance
         
         return sample_next
+    
+    def sample(self, model, batch_size: int, image_shape: Sequence, generator=None):
+        image = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
+        for t in self.timesteps:
+            output = model(image, t, self.alphas_cumprod[t])
+            image = self.step(output, t, generator=generator)
+        return image
 
 
 class DDIMInverseSampler():
