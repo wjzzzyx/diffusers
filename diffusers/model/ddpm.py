@@ -25,22 +25,23 @@ class DDPM(nn.Module):
     def device(self):
         return self.unet.conv_in.weight.device
     
-    def forward(self, xt, t, alpha_cumprod_t):
+    def forward(self, xt, t):
         output = self.unet(xt, t)
         # epsilon, x0
-        if self.prediction_type == 'epsilon':
-            epsilon = output
-            sample = (xt - torch.sqrt(1 - alpha_cumprod_t) * output) / torch.sqrt(alpha_cumprod_t)
-        elif self.prediction_type == 'sample':
-            sample = output
-            epsilon = (xt - torch.sqrt(alpha_cumprod_t) * output) / torch.sqrt(1 - alpha_cumprod_t)
-        elif self.prediction_type == 'v_prediction':
-            raise NotImplementedError('v_prediction is not implemented for DDPM.')
+        # if self.prediction_type == 'epsilon':
+        #     epsilon = output
+        #     sample = (xt - torch.sqrt(1 - alpha_cumprod_t) * output) / torch.sqrt(alpha_cumprod_t)
+        # elif self.prediction_type == 'sample':
+        #     sample = output
+        #     epsilon = (xt - torch.sqrt(alpha_cumprod_t) * output) / torch.sqrt(1 - alpha_cumprod_t)
+        # elif self.prediction_type == 'v_prediction':
+        #     raise NotImplementedError('v_prediction is not implemented for DDPM.')
 
-        return {
-            'epsilon': epsilon,
-            'sample': sample,
-        }
+        # return {
+        #     'epsilon': epsilon,
+        #     'sample': sample,
+        # }
+        return output
 
     def _convert_deprecated_attention_blocks(self, state_dict: collections.OrderedDict):
         for key in list(state_dict.keys()):

@@ -58,8 +58,16 @@ class DDPMSampler():
     def sample(self, model, batch_size: int, image_shape: Sequence, generator=None):
         image = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
         for t in self.timesteps:
-            output = model(image, t, self.alphas_cumprod[t])
-            image = self.step(output, t, generator=generator)
+            output = model(image, t)
+            if model.prediction_type == 'epsilon':
+                epsilon = output
+                sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
+            elif model.prediction_type == 'sample':
+                sample = output
+                epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
+            elif model.prediction_type == 'v_prediction':
+                raise NotImplementedError('v_prediction is not implemented for DDPM.')
+            image = self.step({'sample': sample, 'epsilon': epsilon}, t, image, generator=generator)
         return image
 
 

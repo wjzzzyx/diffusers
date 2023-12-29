@@ -15,6 +15,7 @@ class DPMSampler():
         second_order: bool,
         uses_ensd: bool,
         num_train_steps: int,
+        num_inference_steps: int,
         beta_start: float,
         beta_end: float,
         beta_schedule: str,
@@ -34,6 +35,7 @@ class DPMSampler():
         self.discard_next_to_last_sigma = discard_next_to_last_sigma
         self.second_order = second_order
         self.uses_ensd = uses_ensd
+        self.num_inference_steps = num_inference_steps
         self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
@@ -59,7 +61,12 @@ class DPMSampler():
         return sigmas
     
     def get_denoiser(self, model):
-        denoiser = k_diffusion.external.DiscreteEpsDDPMDenoiser(model, self.alphas_cumprod, quantize=False)
+        if model.prediction_type == 'epsilon':
+            denoiser = k_diffusion.external.DiscreteEpsDDPMDenoiser(model, self.alphas_cumprod, quantize=False)
+        elif model.prediction_type == 'v_prediction':
+            denoiser = k_diffusion.external.DiscreteVDDPMDenoiser(model, self.alphas_cumprod, quantize=False)
+        else:
+            raise NotImplementedError()
         if self.cfg_scale > 1:
             denoiser = CFGDenoiser(denoiser, self.cfg_scale)
         return denoiser
@@ -76,16 +83,17 @@ class DPMSampler():
         cond_neg_prompt: torch.Tensor = None,
         generator = None
     ) -> torch.Tensor:
-        denoiser = self.get_denoiser(model)
+        denoiser = self.get_denoiser(model).to(model.device)
         sigmas = self.get_sigmas(denoiser).to(model.device)
 
-        noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.device)
+        noise = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
         xi = noise * sigmas[0]
 
-        extra_args = {
-            'cond_pos_prompt': cond_pos_prompt,
-            'cond_neg_prompt': cond_neg_prompt,
-        }
+        extra_args = dict()
+        if cond_pos_prompt is not None:
+            extra_args['cond_pos_prompt'] = cond_pos_prompt
+        if cond_neg_prompt is not None:
+            extra_args['cond_neg_prompt'] = cond_neg_prompt
 
         if self.sampler == 'dpmpp_2m':
             sample = k_diffusion.sampling.sample_dpmpp_2m(
