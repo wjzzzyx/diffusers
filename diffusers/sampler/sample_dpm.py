@@ -1,8 +1,9 @@
 import torch
 from typing import Callable, Sequence
 
-import k_diffusion
-from . import schedule
+from diffusers import k_diffusion
+from diffusers.sampler import schedule
+from diffusers.sampler.denoiser import CFGDenoiser
 
 
 class DPMSampler():
@@ -118,7 +119,7 @@ class DPMSampler():
             )
         elif self.sampler == 'dpm_2':
             sample = k_diffusion.sampling.sample_dpm_2(
-                denoiser, xi, sigmas=sigmas, s_churn=0., s_tmin=0., s_tmax=0., s_noise=1.,
+                denoiser, xi, sigmas=sigmas, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                 extra_args=extra_args
             )
         elif self.sampler == 'dpm_2_ancestral':
@@ -201,7 +202,7 @@ class DPMSampler():
             )
         elif self.sampler == 'dpm_2':
             sample = k_diffusion.sampling.sample_dpm_2(
-                denoiser, xi, sigmas=sigma_sched, s_churn=0., s_tmin=0., s_tmax=0., s_noise=1.,
+                denoiser, xi, sigmas=sigma_sched, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
                 extra_args=extra_args
             )
         elif self.sampler == 'dpm_2_ancestral':
@@ -222,24 +223,3 @@ class DPMSampler():
         
         sample = sample * mask + image * (1 - mask)
         return sample
-    
-
-class CFGDenoiser():
-    def __init__(self, denoiser, cfg_scale):
-        self.denoiser = denoiser
-        self.cfg_scale = cfg_scale
-
-    def __call__(self, x, sigma, cond_pos_prompt, cond_neg_prompt, cond_imaging, image, mask):
-        x_in = torch.cat([x, x])
-        sigma_in = torch.cat([sigma, sigma])
-        cond_imaging_in = torch.cat([cond_imaging, cond_imaging])
-        cond_prompt_in = torch.cat([cond_pos_prompt, cond_neg_prompt])
-
-        x_out = self.denoiser(x_in, sigma_in, cond={'c_crossattn': [cond_prompt_in], 'c_concat': [cond_imaging_in]})
-
-        denoised_pos = x_out[:cond_pos_prompt.shape[0]]
-        denoised_neg = x_out[-cond_neg_prompt.shape[0]:]
-        denoised = denoised_neg + self.cfg_scale * (denoised_pos - denoised_neg)
-
-        denoised = denoised * mask + image * (1 - mask)
-        return denoised
