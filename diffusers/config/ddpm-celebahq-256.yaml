@@ -24,13 +24,104 @@ model:
         up_block_types: ["UpBlock2D", "AttnUpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"]
     
     sampler_config:
-      beta_end: 0.02
-      beta_schedule: linear
-      beta_start: 0.0001
-      clip_sample: true
-      num_train_steps: 1000
-      trained_betas: null
-      variance_type: fixed_small
+      target: diffusers.sampler.sample_ddpm.DDPMSampler
+      params:
+        num_train_steps: 1000
+        num_inference_steps: 20
+        beta_start: 0.0001
+        beta_end: 0.02
+        beta_schedule: linear
+        # clip_sample: true
+        # trained_betas: null
+        # variance_type: fixed_small
+      
+      target: diffusers.sampler.sample_dpm.DPMSampler
+      params:
+        # DPM++ 2M
+        sampler: dpmpp_2m
+        scheduler: karras    # ('', karras)
+        solver_type: ''
+        discard_next_to_last_sigma: false
+        second_order: false
+        uses_ensd: false
+
+        # DPM++ SDE 
+        sampler: dpmpp_sde
+        scheduler: karras    # ('', karras)
+        solver_type: ''
+        discard_next_to_last_sigma: false
+        second_order: true
+        uses_ensd: false
+
+        # DPM++ 2M SDE
+        sampler: dpmpp_2m_sde
+        scheduler: karras    # ('', karras, exponential)
+        solver_type: midpoint    # (midpoint, heun)
+        discard_next_to_last_sigma: false
+        second_order: false
+        uses_ensd: false
+
+        # DPM++ 2S
+        sampler: dpmpp_2s_ancestral
+        scheduler: karras    # ('', karras)
+        solver_type: ''
+        discard_next_to_last_sigma: false
+        second_order: true
+        uses_ensd: true
+
+        # DPM++ 3M SDE
+        sampler: dpmpp_3m_sde
+        scheduler: karras    # ('', karras, exponential)
+        solver_type: ''
+        discard_next_to_last_sigma: true
+        second_order: false
+        uses_ensd: false
+
+        # DPM2
+        sampler: dpm_2
+        scheduler: ''
+        solver_type: ''
+        discard_next_to_last_sigma: true
+        second_order: true
+        uses_ensd: false
+
+        # DPM2 karras
+        sampler: dpm_2
+        scheduler: karras
+        solver_type: ''
+        discard_next_to_last_sigma: true
+        second_order: true
+        uses_ensd: true
+
+        # DPM2 a
+        sampler: dpm_2_ancestral
+        scheduler: ''    # ('', karras)
+        solver_type: ''
+        discard_next_to_last_sigma: true
+        second_order: true
+        uses_ensd: true
+
+        # DPM fast
+        sampler: dpm_fast
+        scheduler: ''
+        solver_type: ''
+        discard_next_to_last_sigma: false
+        second_order: false
+        uses_ensd: true
+
+        # DPM adaptive
+        sampler: dpm_adaptive
+        scheduler: ''
+        solver_type: ''
+        discard_next_to_last_sigma: false
+        second_order: false
+        uses_ensd: true
+
+        num_train_steps: 1000
+        num_inference_steps: 20
+        beta_start: 0.0001
+        beta_end: 0.02
+        beta_schedule: linear
 
 data:
   predict_batch_size: 4
