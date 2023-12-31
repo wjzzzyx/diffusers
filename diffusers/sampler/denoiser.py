@@ -1,4 +1,31 @@
 import torch
+import torch.nn as nn
+
+
+class DiscreteTimestepsDenoiser(nn.Module):
+    def __init__(self, model, alphas_cumprod):
+        super().__init__()
+        self.inner_model = model
+        self.alphas_cumprod = alphas_cumprod
+    
+    def forward(self, input, timesteps, **kwargs):
+        return self.inner_model(input, timesteps, **kwargs)
+
+
+class DiscreteTimestepsVDenoiser(nn.Module):
+    def __init__(self, model, alphas_cumprod):
+        self.inner_model = model
+        self.alphas_cumprod = alphas_cumprod
+        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - alphas_cumprod)
+    
+    def predict_eps_from_z_and_v(self, x_t, t, v):
+        return self.sqrt_alphas_cumprod[t, None, None, None] * v + self.sqrt_one_minus_alphas_cumprod[t, None, None, None] * x_t
+
+    def forward(self, input, timesteps, **kwargs):
+        out = self.inner_model(input, timesteps, **kwargs)
+        e_t = self.predict_eps_from_z_and_v(input, timesteps, out)
+        return e_t
 
 
 class CFGDenoiser():
