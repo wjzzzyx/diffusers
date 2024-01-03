@@ -9,14 +9,18 @@ class DDPMSampler():
     def __init__(
         self,
         num_train_steps: int,
+        num_inference_steps: int,
         beta_start: float,
         beta_end: float,
         beta_schedule: str,
     ):
         self.num_train_steps = num_train_steps
+        self.num_inference_steps = num_inference_steps
         self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+
+        self.set_timesteps(num_inference_steps)
     
     def set_timesteps(self, num_inference_steps: int):
         self.num_inference_steps = num_inference_steps
