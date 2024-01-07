@@ -95,7 +95,7 @@ class PLBase(lightning.LightningModule):
         samples = (samples + 1) / 2
         log_image_dict = {
             'image': samples,
-            'index': batch['index'],
+            'fname': batch['fname'],
         }
         log_keys = ['image']
         self.log_image(log_image_dict, log_keys, batch_idx, mode='predict')
@@ -113,5 +113,5 @@ class PLBase(lightning.LightningModule):
             image_np = image_t.detach().cpu().numpy()
             image_np = (image_np * 255).astype(np.uint8)
             for i in range(image_np.shape[0]):
-                filename = f"{batch['index'][i]}_{key}.png"
+                filename = f"{os.path.splitext(batch['fname'][i])[0]}_{key}.png"
                 Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))
