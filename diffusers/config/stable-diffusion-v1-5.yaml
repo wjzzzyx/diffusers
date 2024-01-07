@@ -1,0 +1,76 @@
+model:
+  target: diffusers.model.stable_diffusion.PLBase
+  params:
+    model_config:
+      prediction_type: epsilon
+      pretrained:
+      unet:
+        act_fn: silu
+        attention_head_dim: 8
+        block_out_channels: [320, 640, 1280, 1280]
+        center_input_sample: false
+        cross_attention_dim: 768
+        down_block_types: [
+          "CrossAttnDownBlock2D",
+          "CrossAttnDownBlock2D",
+          "CrossAttnDownBlock2D",
+          "DownBlock2D"
+        ],
+        downsample_padding: 1
+        flip_sin_to_cos: true
+        freq_shift: 0
+        in_channels: 4
+        layers_per_block: 2
+        mid_block_scale_factor: 1
+        norm_eps: 1e-05
+        norm_num_groups: 32
+        out_channels: 4
+        sample_size: 64
+        up_block_types: [
+          "UpBlock2D",
+          "CrossAttnUpBlock2D",
+          "CrossAttnUpBlock2D",
+          "CrossAttnUpBlock2D"
+        ]
+      vae:
+        act_fn: silu,
+        block_out_channels: [128, 256, 512, 512],
+        down_block_types: [
+          "DownEncoderBlock2D",
+          "DownEncoderBlock2D",
+          "DownEncoderBlock2D",
+          "DownEncoderBlock2D"
+        ],
+        in_channels: 3,
+        latent_channels: 4,
+        layers_per_block: 2,
+        norm_num_groups: 32,
+        out_channels: 3,
+        sample_size: 512,
+        up_block_types: [
+          "UpDecoderBlock2D",
+          "UpDecoderBlock2D",
+          "UpDecoderBlock2D",
+          "UpDecoderBlock2D"
+        ]
+    
+    sampler_config:
+      target: diffusers.sampler.sample_ddpm.DDPMSampler
+      params:
+        num_train_steps: 1000
+        num_inference_steps: 20
+        beta_start: 0.00085
+        beta_end: 0.012
+        beta_schedule: scaled_linear
+        set_alpha_to_one: false
+        skip_prk_steps: true
+        steps_offset: 1
+        clip_sample: false
+
+data:
+  predict_batch_size: 4
+  num_workers: 0
+  predict:
+    target: diffusers.data.null_image.dataset.NullImageDataset
+    params:
+      len: 32
