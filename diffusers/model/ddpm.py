@@ -14,7 +14,7 @@ import utils
 class DDPM(nn.Module):
     def __init__(self, model_config):
         super().__init__()
-        self.unet = unet_2d.UNet2D(model_config.unet)
+        self.unet = unet_2d.UNet2D(**model_config.unet)
         self.prediction_type = model_config.prediction_type
         if 'pretrained' in model_config:
             ckpt = torch.load(model_config.pretrained, map_location='cpu')
