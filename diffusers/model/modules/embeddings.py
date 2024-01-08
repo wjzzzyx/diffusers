@@ -473,6 +473,18 @@ class MLPProjection(nn.Module):
         return self.norm(self.ff(image_embeds))
 
 
+class IPAdapterFullImageProjection(nn.Module):
+    def __init__(self, image_embed_dim=1024, cross_attention_dim=1024):
+        super().__init__()
+        from .attention import FeedForward
+
+        self.ff = FeedForward(image_embed_dim, cross_attention_dim, mult=1, activation_fn="gelu")
+        self.norm = nn.LayerNorm(cross_attention_dim)
+
+    def forward(self, image_embeds: torch.FloatTensor):
+        return self.norm(self.ff(image_embeds))
+
+
 class CombinedTimestepLabelEmbeddings(nn.Module):
     def __init__(self, num_classes, embedding_dim, class_dropout_prob=0.1):
         super().__init__()
@@ -636,6 +648,27 @@ class FourierEmbedder(nn.Module):
         return torch.stack((x.sin(), x.cos()), dim=-1).permute(0, 1, 3, 4, 2).reshape(*x.shape[:2], -1)
 
 
+def get_fourier_embeds_from_boundingbox(embed_dim, box):
+    """
+    Args:
+        embed_dim: int
+        box: a 3-D tensor [B x N x 4] representing the bounding boxes for GLIGEN pipeline
+    Returns:
+        [B x N x embed_dim] tensor of positional embeddings
+    """
+
+    batch_size, num_boxes = box.shape[:2]
+
+    emb = 100 ** (torch.arange(embed_dim) / embed_dim)
+    emb = emb[None, None, None].to(device=box.device, dtype=box.dtype)
+    emb = emb * box.unsqueeze(-1)
+
+    emb = torch.stack((emb.sin(), emb.cos()), dim=-1)
+    emb = emb.permute(0, 1, 3, 4, 2).reshape(batch_size, num_boxes, embed_dim * 2 * 4)
+
+    return emb
+
+
 class PositionNet(nn.Module):
     def __init__(self, positive_len, out_dim, feature_type="text-only", fourier_freqs=8):
         super().__init__()
@@ -692,6 +725,99 @@ class PositionNet(nn.Module):
 
         # embedding position (it may includes padding as placeholder)
         xyxy_embedding = self.fourier_embedder(boxes)  # B*N*4 -> B*N*C
+
+        # learnable null embedding
+        xyxy_null = self.null_position_feature.view(1, 1, -1)
+
+        # replace padding with learnable null embedding
+        xyxy_embedding = xyxy_embedding * masks + (1 - masks) * xyxy_null
+
+        # positionet with text only information
+        if positive_embeddings is not None:
+            # learnable null embedding
+            positive_null = self.null_positive_feature.view(1, 1, -1)
+
+            # replace padding with learnable null embedding
+            positive_embeddings = positive_embeddings * masks + (1 - masks) * positive_null
+
+            objs = self.linears(torch.cat([positive_embeddings, xyxy_embedding], dim=-1))
+
+        # positionet with text and image infomation
+        else:
+            phrases_masks = phrases_masks.unsqueeze(-1)
+            image_masks = image_masks.unsqueeze(-1)
+
+            # learnable null embedding
+            text_null = self.null_text_feature.view(1, 1, -1)
+            image_null = self.null_image_feature.view(1, 1, -1)
+
+            # replace padding with learnable null embedding
+            phrases_embeddings = phrases_embeddings * phrases_masks + (1 - phrases_masks) * text_null
+            image_embeddings = image_embeddings * image_masks + (1 - image_masks) * image_null
+
+            objs_text = self.linears_text(torch.cat([phrases_embeddings, xyxy_embedding], dim=-1))
+            objs_image = self.linears_image(torch.cat([image_embeddings, xyxy_embedding], dim=-1))
+            objs = torch.cat([objs_text, objs_image], dim=1)
+
+        return objs
+
+
+class GLIGENTextBoundingboxProjection(nn.Module):
+    def __init__(self, positive_len, out_dim, feature_type="text-only", fourier_freqs=8):
+        super().__init__()
+        self.positive_len = positive_len
+        self.out_dim = out_dim
+
+        self.fourier_embedder_dim = fourier_freqs
+        self.position_dim = fourier_freqs * 2 * 4  # 2: sin/cos, 4: xyxy
+
+        if isinstance(out_dim, tuple):
+            out_dim = out_dim[0]
+
+        if feature_type == "text-only":
+            self.linears = nn.Sequential(
+                nn.Linear(self.positive_len + self.position_dim, 512),
+                nn.SiLU(),
+                nn.Linear(512, 512),
+                nn.SiLU(),
+                nn.Linear(512, out_dim),
+            )
+            self.null_positive_feature = torch.nn.Parameter(torch.zeros([self.positive_len]))
+
+        elif feature_type == "text-image":
+            self.linears_text = nn.Sequential(
+                nn.Linear(self.positive_len + self.position_dim, 512),
+                nn.SiLU(),
+                nn.Linear(512, 512),
+                nn.SiLU(),
+                nn.Linear(512, out_dim),
+            )
+            self.linears_image = nn.Sequential(
+                nn.Linear(self.positive_len + self.position_dim, 512),
+                nn.SiLU(),
+                nn.Linear(512, 512),
+                nn.SiLU(),
+                nn.Linear(512, out_dim),
+            )
+            self.null_text_feature = torch.nn.Parameter(torch.zeros([self.positive_len]))
+            self.null_image_feature = torch.nn.Parameter(torch.zeros([self.positive_len]))
+
+        self.null_position_feature = torch.nn.Parameter(torch.zeros([self.position_dim]))
+
+    def forward(
+        self,
+        boxes,
+        masks,
+        positive_embeddings=None,
+        phrases_masks=None,
+        image_masks=None,
+        phrases_embeddings=None,
+        image_embeddings=None,
+    ):
+        masks = masks.unsqueeze(-1)
+
+        # embedding position (it may includes padding as placeholder)
+        xyxy_embedding = get_fourier_embeds_from_boundingbox(self.fourier_embedder_dim, boxes)  # B*N*4 -> B*N*C
 
         # learnable null embedding
         xyxy_null = self.null_position_feature.view(1, 1, -1)
@@ -805,7 +931,152 @@ class CaptionProjection(nn.Module):
         return hidden_states
 
 
+class PixArtAlphaCombinedTimestepSizeEmbeddings(nn.Module):
+    """
+    For PixArt-Alpha.
+
+    Reference:
+    https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L164C9-L168C29
+    """
+
+    def __init__(self, embedding_dim, size_emb_dim, use_additional_conditions: bool = False):
+        super().__init__()
+
+        self.outdim = size_emb_dim
+        self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
+        self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
+
+        self.use_additional_conditions = use_additional_conditions
+        if use_additional_conditions:
+            self.additional_condition_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
+            self.resolution_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=size_emb_dim)
+            self.aspect_ratio_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=size_emb_dim)
+
+    def forward(self, timestep, resolution, aspect_ratio, batch_size, hidden_dtype):
+        timesteps_proj = self.time_proj(timestep)
+        timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=hidden_dtype))  # (N, D)
+
+        if self.use_additional_conditions:
+            resolution_emb = self.additional_condition_proj(resolution.flatten()).to(hidden_dtype)
+            resolution_emb = self.resolution_embedder(resolution_emb).reshape(batch_size, -1)
+            aspect_ratio_emb = self.additional_condition_proj(aspect_ratio.flatten()).to(hidden_dtype)
+            aspect_ratio_emb = self.aspect_ratio_embedder(aspect_ratio_emb).reshape(batch_size, -1)
+            conditioning = timesteps_emb + torch.cat([resolution_emb, aspect_ratio_emb], dim=1)
+        else:
+            conditioning = timesteps_emb
+
+        return conditioning
+
+
+class PixArtAlphaTextProjection(nn.Module):
+    """
+    Projects caption embeddings. Also handles dropout for classifier-free guidance.
+
+    Adapted from https://github.com/PixArt-alpha/PixArt-alpha/blob/master/diffusion/model/nets/PixArt_blocks.py
+    """
+
+    def __init__(self, in_features, hidden_size, num_tokens=120):
+        super().__init__()
+        self.linear_1 = nn.Linear(in_features=in_features, out_features=hidden_size, bias=True)
+        self.act_1 = nn.GELU(approximate="tanh")
+        self.linear_2 = nn.Linear(in_features=hidden_size, out_features=hidden_size, bias=True)
+
+    def forward(self, caption):
+        hidden_states = self.linear_1(caption)
+        hidden_states = self.act_1(hidden_states)
+        hidden_states = self.linear_2(hidden_states)
+        return hidden_states
+
+
 class Resampler(nn.Module):
+    """Resampler of IP-Adapter Plus.
+
+    Args:
+    ----
+        embed_dims (int): The feature dimension. Defaults to 768.
+        output_dims (int): The number of output channels, that is the same
+            number of the channels in the
+            `unet.config.cross_attention_dim`. Defaults to 1024.
+        hidden_dims (int): The number of hidden channels. Defaults to 1280.
+        depth (int): The number of blocks. Defaults to 8.
+        dim_head (int): The number of head channels. Defaults to 64.
+        heads (int): Parallel attention heads. Defaults to 16.
+        num_queries (int): The number of queries. Defaults to 8.
+        ffn_ratio (float): The expansion ratio of feedforward network hidden
+            layer channels. Defaults to 4.
+    """
+
+    def __init__(
+        self,
+        embed_dims: int = 768,
+        output_dims: int = 1024,
+        hidden_dims: int = 1280,
+        depth: int = 4,
+        dim_head: int = 64,
+        heads: int = 16,
+        num_queries: int = 8,
+        ffn_ratio: float = 4,
+    ) -> None:
+        super().__init__()
+        from .attention import FeedForward  # Lazy import to avoid circular import
+
+        self.latents = nn.Parameter(torch.randn(1, num_queries, hidden_dims) / hidden_dims**0.5)
+
+        self.proj_in = nn.Linear(embed_dims, hidden_dims)
+
+        self.proj_out = nn.Linear(hidden_dims, output_dims)
+        self.norm_out = nn.LayerNorm(output_dims)
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        nn.LayerNorm(hidden_dims),
+                        nn.LayerNorm(hidden_dims),
+                        Attention(
+                            query_dim=hidden_dims,
+                            dim_head=dim_head,
+                            heads=heads,
+                            out_bias=False,
+                        ),
+                        nn.Sequential(
+                            nn.LayerNorm(hidden_dims),
+                            FeedForward(hidden_dims, hidden_dims, activation_fn="gelu", mult=ffn_ratio, bias=False),
+                        ),
+                    ]
+                )
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+        ----
+            x (torch.Tensor): Input Tensor.
+
+        Returns:
+        -------
+            torch.Tensor: Output Tensor.
+        """
+        latents = self.latents.repeat(x.size(0), 1, 1)
+
+        x = self.proj_in(x)
+
+        for ln0, ln1, attn, ff in self.layers:
+            residual = latents
+
+            encoder_hidden_states = ln0(x)
+            latents = ln1(latents)
+            encoder_hidden_states = torch.cat([encoder_hidden_states, latents], dim=-2)
+            latents = attn(latents, encoder_hidden_states) + residual
+            latents = ff(latents) + latents
+
+        latents = self.proj_out(latents)
+        return self.norm_out(latents)
+
+
+class IPAdapterPlusImageProjection(nn.Module):
     """Resampler of IP-Adapter Plus.
 
     Args:
