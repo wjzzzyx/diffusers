@@ -1,4 +1,6 @@
+import collections
 import lightning
+import numpy as np
 import os
 from PIL import Image
 import torch
@@ -13,19 +15,37 @@ from diffusers.model.modules.unet_2d_condition import UNet2DConditionModel
 from diffusers.model.modules.autoencoder_kl import AutoencoderKL
 
 
+def _convert_deprecated_attention_blocks(self, state_dict: collections.OrderedDict):
+        for key in list(state_dict.keys()):
+            if 'attention' in key and 'query' in key:
+                state_dict[key.replace('.query.', '.to_q.')] = state_dict.pop(key)
+            if 'attention' in key and 'key' in key:
+                state_dict[key.replace('.key.', '.to_k.')] = state_dict.pop(key)
+            if 'attention' in key and 'value' in key:
+                state_dict[key.replace('.value.', '.to_v.')] = state_dict.pop(key)
+            if 'attention' in key and 'proj_attn' in key:
+                state_dict[key.replace('.proj_attn.', '.to_out.0.')] = state_dict.pop(key)
+
+
 class StableDiffusion(nn.Module):
     def __init__(self, model_config):
         super().__init__()
         self.model_config = model_config
 
-        self.unet = UNet2DConditionModel(model_config.unet)
-        self.vae = AutoencoderKL(model_config.vae)
+        self.unet = UNet2DConditionModel(**model_config.unet)
+        self.vae = AutoencoderKL(**model_config.vae)
         self.tokenizer = CLIPTokenizer.from_pretrained(model_config.pretrained, subfolder='tokenizer', local_files_only=True)
         self.text_encoder = CLIPTextModel.from_pretrained(model_config.pretrained, subfolder='text_encoder', local_files_only=True)
         
-        ckpt = torch.load(model_config.pretrained, map_location='cpu')
-        self._convert_deprecated_attention_blocks(ckpt)
-        self.load_state_dict(ckpt)
+        ckpt = torch.load(os.path.join(model_config.pretrained, 'unet', 'diffusion_pytorch_model.bin'), map_location='cpu')
+        self.unet.load_state_dict(ckpt)
+        ckpt = torch.load(os.path.join(model_config.pretrained, 'vae', 'diffusion_pytorch_model.bin'), map_location='cpu')
+        _convert_deprecated_attention_blocks(ckpt)
+        self.vae.load_state_dict(ckpt)
+        
+        # ckpt = torch.load(model_config.pretrained, map_location='cpu')
+        # self._convert_deprecated_attention_blocks(ckpt)
+        # self.load_state_dict(ckpt)
 
         # freeze submodules
         self.text_encoder.requires_grad_(False)
