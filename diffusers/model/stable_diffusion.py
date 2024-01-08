@@ -16,15 +16,15 @@ from diffusers.model.modules.autoencoder_kl import AutoencoderKL
 
 
 def _convert_deprecated_attention_blocks(self, state_dict: collections.OrderedDict):
-        for key in list(state_dict.keys()):
-            if 'attention' in key and 'query' in key:
-                state_dict[key.replace('.query.', '.to_q.')] = state_dict.pop(key)
-            if 'attention' in key and 'key' in key:
-                state_dict[key.replace('.key.', '.to_k.')] = state_dict.pop(key)
-            if 'attention' in key and 'value' in key:
-                state_dict[key.replace('.value.', '.to_v.')] = state_dict.pop(key)
-            if 'attention' in key and 'proj_attn' in key:
-                state_dict[key.replace('.proj_attn.', '.to_out.0.')] = state_dict.pop(key)
+    for key in list(state_dict.keys()):
+        if 'attention' in key and 'query' in key:
+            state_dict[key.replace('.query.', '.to_q.')] = state_dict.pop(key)
+        if 'attention' in key and 'key' in key:
+            state_dict[key.replace('.key.', '.to_k.')] = state_dict.pop(key)
+        if 'attention' in key and 'value' in key:
+            state_dict[key.replace('.value.', '.to_v.')] = state_dict.pop(key)
+        if 'attention' in key and 'proj_attn' in key:
+            state_dict[key.replace('.proj_attn.', '.to_out.0.')] = state_dict.pop(key)
 
 
 class StableDiffusion(nn.Module):
