@@ -256,13 +256,18 @@ class MultiHeadAttention(nn.Module):
         # q, k, v with shape (B * nHead, H * W, C)
         q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
 
-        attn = (q * self.scale) @ k.transpose(-2, -1)
+        attn_bias = None
 
         if self.use_rel_pos:
-            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+            attn_bias = add_decomposed_rel_pos(q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+            attn_bias = attn_bias.view(B, self.num_heads, attn_bias.size(-1), attn_bias.size(-1))
+        
+        q = q.view(B, self.num_heads, H * W, -1)
+        k = k.view(B, self.num_heads, H * W, -1)
+        v = v.view(B, self.num_heads, H * W, -1)
 
-        attn = attn.softmax(dim=-1)
-        x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
+        x = x.view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
         x = self.proj(x)
 
         return x
@@ -343,15 +348,14 @@ def get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor
         rel_pos_resized = rel_pos
 
     # Scale the coords with short length if shapes for q and k are different.
-    q_coords = torch.arange(q_size)[:, None] * max(k_size / q_size, 1.0)
-    k_coords = torch.arange(k_size)[None, :] * max(q_size / k_size, 1.0)
+    q_coords = torch.arange(q_size, device=rel_pos.device)[:, None] * max(k_size / q_size, 1.0)
+    k_coords = torch.arange(k_size, device=rel_pos.device)[None, :] * max(q_size / k_size, 1.0)
     relative_coords = (q_coords - k_coords) + (k_size - 1) * max(q_size / k_size, 1.0)
 
     return rel_pos_resized[relative_coords.long()]
 
 
 def add_decomposed_rel_pos(
-    attn: torch.Tensor,
     q: torch.Tensor,
     rel_pos_h: torch.Tensor,
     rel_pos_w: torch.Tensor,
@@ -374,17 +378,17 @@ def add_decomposed_rel_pos(
     """
     q_h, q_w = q_size
     k_h, k_w = k_size
-    Rh = get_rel_pos(q_h, k_h, rel_pos_h)
-    Rw = get_rel_pos(q_w, k_w, rel_pos_w)
+    Rh = get_rel_pos(q_h, k_h, rel_pos_h)    # shape (q_h, k_h, emb_size)
+    Rw = get_rel_pos(q_w, k_w, rel_pos_w)    # shape (q_w, k_w, emb_size)
 
     B, _, dim = q.shape
     r_q = q.reshape(B, q_h, q_w, dim)
-    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)
-    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)
+    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)    # shape (B, q_h, q_w, k_h)
+    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)    # shape (B, q_h, q_w, k_w)
 
     attn = (
-        attn.view(B, q_h, q_w, k_h, k_w) + rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]
-    ).view(B, q_h * q_w, k_h * k_w)
+        rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]
+    ).reshape(B, q_h * q_w, k_h * k_w)
 
     return attn
 
@@ -494,10 +498,21 @@ class PromptEncoder(nn.Module):
             points = torch.cat([points, padding_point], dim=1)
             labels = torch.cat([labels, padding_label], dim=1)
         point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
-        point_embedding[labels == -1] = 0.0
-        point_embedding[labels == -1] += self.not_a_point_embed.weight
-        point_embedding[labels == 0] += self.point_embeddings[0].weight
-        point_embedding[labels == 1] += self.point_embeddings[1].weight
+        point_embedding = torch.where(
+            (labels == -1).unsqueeze(-1).expand_as(point_embedding),
+            self.not_a_point_embed.weight.unsqueeze(0).expand_as(point_embedding),
+            point_embedding
+        )
+        point_embedding = torch.where(
+            (labels == 0).unsqueeze(-1).expand_as(point_embedding),
+            point_embedding + self.point_embeddings[0].weight.unsqueeze(0).expand_as(point_embedding),
+            point_embedding
+        )
+        point_embedding = torch.where(
+            (labels == 1).unsqueeze(-1).expand_as(point_embedding),
+            point_embedding + self.point_embeddings[1].weight.unsqueeze(0).expand_as(point_embedding),
+            point_embedding
+        )
         return point_embedding
 
     def _embed_boxes(self, boxes: torch.Tensor) -> torch.Tensor:
@@ -1001,13 +1016,9 @@ class Attention(nn.Module):
         v = self._separate_heads(v, self.num_heads)
 
         # Attention
-        _, _, _, c_per_head = q.shape
-        attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-        attn = attn / math.sqrt(c_per_head)
-        attn = torch.softmax(attn, dim=-1)
+        out = F.scaled_dot_product_attention(q, k, v)
 
         # Get output
-        out = attn @ v
         out = self._recombine_heads(out)
         out = self.out_proj(out)
 
