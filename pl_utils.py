@@ -353,7 +353,7 @@ def get_callbacks(args, config, lightning_config):
             "target": "pytorch_lightning.callbacks.ModelCheckpoint",
             "params": {
                 "dirpath": args.ckptdir,
-                "filename": "{epoch:06}",
+                # "filename": "{epoch:06}",
                 "verbose": True,
                 "save_last": True,
             }
