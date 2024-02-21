@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.classification import BinaryJaccardIndex
+from typing import Sequence
 
 from classifiers.model.resnet import build_resnet
 from segmentors import metrics
@@ -15,16 +16,28 @@ class DeepLabV3(nn.Module):
 
     def __init__(self, model_config):
         super().__init__()
-        self.backbone = build_resnet('resnet50', replace_stride_with_dilation=[False, True, True])
+        self.backbone = build_resnet('resnet50', replace_stride_with_dilation=[False, True, True], return_feature_only=True)
         self.classifier = DeepLabHead(2048, model_config.num_classes)
-        self.aux_classifier = FCNHead(1024, model_config.num_classes)
+        if model_config.use_aux_classifier:
+            self.aux_classifier = FCNHead(1024, model_config.num_classes)
+        else:
+            self.aux_classifier = None
+        
+        if 'pretrained' in model_config:
+            state_dict = torch.load(model_config.pretrained, map_location='cpu')
+            state_dict.pop('classifier.4.weight')
+            state_dict.pop('classifier.4.bias')
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            print(f'Load pretrained model {model_config.pretrained}')
+            print(f'Missing keys: {missing}')
+            print(f'Unexpected keys: {unexpected}')
     
     def forward(self, x: torch.Tensor):
         input_shape = x.shape[-2:]
         features = self.backbone(x)
 
         result = collections.OrderedDict()
-        x = features['out']
+        x = features
         x = self.classifier(x)
         x = F.interpolate(x, size=input_shape, mode='bilinear', align_corners=False)
         result['out'] = x
@@ -39,7 +52,7 @@ class DeepLabV3(nn.Module):
 
 
 class DeepLabHead(nn.Sequential):
-    def __init__(self, in_channels: int, num_classes: int, atrous_rates: nn.Sequence[int] = (12, 24, 36)) -> None:
+    def __init__(self, in_channels: int, num_classes: int, atrous_rates: Sequence[int] = (12, 24, 36)) -> None:
         super().__init__(
             ASPP(in_channels, atrous_rates),
             nn.Conv2d(256, 256, 3, padding=1, bias=False),
@@ -50,7 +63,7 @@ class DeepLabHead(nn.Sequential):
 
 
 class ASPP(nn.Module):
-    def __init__(self, in_channels: int, atrous_rates: nn.Sequence[int], out_channels: int = 256) -> None:
+    def __init__(self, in_channels: int, atrous_rates: Sequence[int], out_channels: int = 256) -> None:
         super().__init__()
         modules = []
         modules.append(
@@ -130,7 +143,7 @@ class PLBase(lightning.LightningModule):
         self.metric_config = metric_config
     
         self.model = DeepLabV3(model_config)
-        self.loss_fn = nn.CrossEntropyLoss()
+        self.loss_fn = nn.BCEWithLogitsLoss()
         self.metric_ious = nn.ModuleList([BinaryJaccardIndex(threshold=0.5) for _ in range(metric_config.num_valsets)])
         self.metric_boundary_ious = nn.ModuleList([metrics.BoundaryJaccardIndex() for _ in range(metric_config.num_valsets)])
 
@@ -147,8 +160,8 @@ class PLBase(lightning.LightningModule):
     def training_step(self, batch, batch_idx):
         outputs = self.model(batch['image'])
         logits = outputs['out']
-        loss = self.loss_fn(logits, batch['mask'])
-        logdict = {'train/loss_ce': loss.item()}
+        loss = self.loss_fn(logits, batch['mask'].float())
+        logdict = {'train/loss_bce': loss.item()}
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
         return loss
     
