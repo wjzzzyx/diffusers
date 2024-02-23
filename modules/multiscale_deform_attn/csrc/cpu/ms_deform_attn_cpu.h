@@ -8,12 +8,8 @@
 **************************************************************************************************
 */
 
-#include <vector>
-
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-
-namespace groundingdino {
+#pragma once
+#include <torch/extension.h>
 
 at::Tensor
 ms_deform_attn_cpu_forward(
@@ -22,10 +18,7 @@ ms_deform_attn_cpu_forward(
     const at::Tensor &level_start_index,
     const at::Tensor &sampling_loc,
     const at::Tensor &attn_weight,
-    const int im2col_step)
-{
-    AT_ERROR("Not implement on cpu");
-}
+    const int im2col_step);
 
 std::vector<at::Tensor>
 ms_deform_attn_cpu_backward(
@@ -35,9 +28,6 @@ ms_deform_attn_cpu_backward(
     const at::Tensor &sampling_loc,
     const at::Tensor &attn_weight,
     const at::Tensor &grad_output,
-    const int im2col_step)
-{
-    AT_ERROR("Not implement on cpu");
-}
+    const int im2col_step);
 
-} // namespace groundingdino
+

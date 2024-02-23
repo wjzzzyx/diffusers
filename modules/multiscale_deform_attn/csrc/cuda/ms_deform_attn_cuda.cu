@@ -9,14 +9,13 @@
 */
 
 #include <vector>
-#include "ms_deform_im2col_cuda.cuh"
+#include "cuda/ms_deform_im2col_cuda.cuh"
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-namespace groundingdino {
 
 at::Tensor ms_deform_attn_cuda_forward(
     const at::Tensor &value, 
@@ -152,5 +151,3 @@ std::vector<at::Tensor> ms_deform_attn_cuda_backward(
         grad_value, grad_sampling_loc, grad_attn_weight
     };
 }
-
-} // namespace groundingdino
