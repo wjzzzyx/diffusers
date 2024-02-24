@@ -1,5 +1,6 @@
 import lightning
 import os
+from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,7 +25,7 @@ class PSPModule(nn.Module):
 
     def forward(self, feats):
         h, w = feats.size(2), feats.size(3)
-        priors = [F.upsample(input=stage(feats), size=(h, w), mode='bilinear') for stage in self.stages] + [feats]
+        priors = [F.interpolate(input=stage(feats), size=(h, w), mode='bilinear') for stage in self.stages] + [feats]
         bottle = self.bottleneck(torch.cat(priors, 1))
         return self.relu(bottle)
 
@@ -40,15 +41,15 @@ class PSPUpsample(nn.Module):
 
     def forward(self, x):
         h, w = 2 * x.size(2), 2 * x.size(3)
-        p = F.upsample(input=x, size=(h, w), mode='bilinear')
+        p = F.interpolate(input=x, size=(h, w), mode='bilinear')
         return self.conv(p)
 
 
 class PSPNet(nn.Module):
-    def __init__(self, n_classes=18, sizes=(1, 2, 3, 6), psp_size=2048, deep_features_size=1024):
+    def __init__(self, model_config):
         super().__init__()
         self.feats = build_resnet('resnet50', return_feature_only=True)
-        self.psp = PSPModule(psp_size, 1024, sizes)
+        self.psp = PSPModule(model_config.psp_size, 1024, model_config.sizes)
         self.drop_1 = nn.Dropout2d(p=0.3)
 
         self.up_1 = PSPUpsample(1024, 256)
@@ -57,18 +58,18 @@ class PSPNet(nn.Module):
 
         self.drop_2 = nn.Dropout2d(p=0.15)
         self.final = nn.Sequential(
-            nn.Conv2d(64, n_classes, kernel_size=1),
-            nn.LogSoftmax()
+            nn.Conv2d(64, model_config.num_classes, kernel_size=1),
+            # nn.LogSoftmax()
         )
 
         # self.classifier = nn.Sequential(
-        #     nn.Linear(deep_features_size, 256),
+        #     nn.Linear(model_config.deep_features_size, 256),
         #     nn.ReLU(),
         #     nn.Linear(256, n_classes)
         # )
 
     def forward(self, x):
-        f, class_f = self.feats(x) 
+        f = self.feats(x) 
         p = self.psp(f)
         p = self.drop_1(p)
 
@@ -83,7 +84,11 @@ class PSPNet(nn.Module):
 
         # auxiliary = F.adaptive_max_pool2d(input=class_f, output_size=(1, 1)).view(-1, class_f.size(1))
 
-        return self.final(p)# , self.classifier(auxiliary)
+        # return self.final(p), self.classifier(auxiliary)
+
+        p = self.final(p)
+        p = F.interpolate(p, scale_factor=4, mode='bilinear')
+        return p
 
 
 class PLBase(lightning.LightningModule):
@@ -112,7 +117,7 @@ class PLBase(lightning.LightningModule):
     
     def training_step(self, batch, batch_idx):
         outputs = self.model(batch['image'])
-        logits = outputs['out']
+        logits = outputs
         loss = self.loss_fn(logits, batch['mask'].float())
         logdict = {'train/loss_ce': loss.item()}
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'].size(0))
@@ -120,7 +125,7 @@ class PLBase(lightning.LightningModule):
     
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         outputs = self.model(batch['image'])
-        pred_masks = (outputs['out'] > 0).type(torch.uint8)
+        pred_masks = (outputs > 0).type(torch.uint8)
         label_masks = batch['mask']
         self.metric_ious[dataloader_idx].update(pred_masks, label_masks)
         self.metric_boundary_ious[dataloader_idx].update(pred_masks, label_masks)
@@ -129,7 +134,7 @@ class PLBase(lightning.LightningModule):
     
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         outputs = self.model(batch['image'])
-        pred_masks = (outputs['out'] > 0).type(torch.uint8)
+        pred_masks = (outputs > 0).type(torch.uint8)
         label_masks = batch['mask']
         self.metric_ious[dataloader_idx].update(pred_masks, label_masks)
         self.metric_boundary_ious[dataloader_idx].update(pred_masks, label_masks)

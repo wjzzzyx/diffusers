@@ -3,6 +3,7 @@ import os
 from PIL import Image
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchmetrics.classification import BinaryJaccardIndex
 
 from classifiers.model.resnet import BasicBlock, Bottleneck
@@ -207,7 +208,7 @@ class HighResolutionNet(nn.Module):
             model_config.stage2_num_branches,
             model_config.stage2_num_blocks,
             model_config.stage2_num_channels,
-            model_config.stage2_block,
+            blocks_dict[model_config.stage2_block],
             model_config.stage2_fuse_method,
             num_channels
         )
@@ -224,7 +225,7 @@ class HighResolutionNet(nn.Module):
             model_config.stage3_num_branches,
             model_config.stage3_num_blocks,
             model_config.stage3_num_channels,
-            model_config.stage3_block,
+            blocks_dict[model_config.stage3_block],
             model_config.stage3_fuse_method,
             num_channels
         )
@@ -241,7 +242,7 @@ class HighResolutionNet(nn.Module):
             model_config.stage4_num_branches,
             model_config.stage4_num_blocks,
             model_config.stage4_num_channels,
-            model_config.stage4_block,
+            blocks_dict[model_config.stage4_block],
             model_config.stage4_fuse_method,
             num_channels,
             multi_scale_output=False
@@ -256,6 +257,9 @@ class HighResolutionNet(nn.Module):
         )
 
         self.init_weights()
+
+        self.register_buffer('pixel_mean', torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1), persistent=False)
+        self.register_buffer('pixel_std', torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1), persistent=False)
 
     def _make_transition_layer(
             self, num_channels_pre_layer, num_channels_cur_layer):
@@ -345,6 +349,7 @@ class HighResolutionNet(nn.Module):
         return nn.Sequential(*modules), num_inchannels
 
     def forward(self, x):
+        x = self.normalize(x)
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -379,6 +384,8 @@ class HighResolutionNet(nn.Module):
 
         x = self.final_layer(y_list[0])
 
+        x = F.interpolate(x, scale_factor=4, mode='bilinear')
+
         return x
 
     def init_weights(self):
@@ -398,6 +405,11 @@ class HighResolutionNet(nn.Module):
                 for name, _ in m.named_parameters():
                     if name in ['bias']:
                         nn.init.constant_(m.bias, 0)
+    
+    def normalize(self, image):
+        image = image / 255.
+        image = (image - self.pixel_mean) / self.pixel_std
+        return image
 
 
 class PLBase(lightning.LightningModule):
