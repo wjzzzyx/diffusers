@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import gradcheck
 
-from functions.ms_deform_attn_func import MSDeformAttnFunction, ms_deform_attn_core_pytorch
+from ms_deform_attn_func import MSDeformAttnFunction, ms_deform_attn_core_pytorch
 
 
 N, M, D = 1, 2, 2
