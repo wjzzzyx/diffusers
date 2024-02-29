@@ -47,7 +47,6 @@ class MSDeformAttn(nn.Module):
         num_levels: int = 4,
         num_points: int = 4,
         img2col_step: int = 64,
-        batch_first: bool = False
     ):
         """
         Multi-Scale Deformable Attention Module
@@ -68,7 +67,6 @@ class MSDeformAttn(nn.Module):
             )
 
         self.im2col_step = img2col_step
-        self.batch_first = batch_first
 
         self.embed_dim = embed_dim
         self.num_levels = num_levels
@@ -101,6 +99,16 @@ class MSDeformAttn(nn.Module):
         constant_(self.value_proj.bias.data, 0.)
         xavier_uniform_(self.output_proj.weight.data)
         constant_(self.output_proj.bias.data, 0.)
+
+    def freeze_sampling_offsets(self):
+        print('Freeze sampling offsets')
+        self.sampling_offsets.weight.requires_grad = False
+        self.sampling_offsets.bias.requires_grad = False
+
+    def freeze_attention_weights(self):
+        print('Freeze attention weights')
+        self.attention_weights.weight.requires_grad = False
+        self.attention_weights.bias.requires_grad = False
 
     def forward(
         self,
