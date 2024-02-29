@@ -234,9 +234,9 @@ class SwinTransformerBlock(nn.Module):
 
     def shift_window_attn_mask(self, H, W):
         # calculate attention mask for SW-MSA
-        Hp = int(np.ceil(H / self.window_size)) * self.window_size
-        Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = torch.zeros((1, Hp, Wp, 1))  # 1 Hp Wp 1
+        # Hp = int(np.ceil(H / self.window_size)) * self.window_size
+        # Wp = int(np.ceil(W / self.window_size)) * self.window_size
+        img_mask = torch.zeros((1, H, W, 1))  # 1 Hp Wp 1
         h_slices = (slice(0, -self.window_size),
                     slice(-self.window_size, -self.shift_size),
                     slice(-self.shift_size, None))
@@ -266,11 +266,6 @@ class SwinTransformerBlock(nn.Module):
             # if window size is larger than input resolution, we don't partition windows
             self.shift_size = 0
             self.window_size = min(H, W)
-        
-        if self.shift_size > 0:
-            attn_mask = self.shift_window_attn_mask(H, W)
-        else:
-            attn_mask = None
 
         shortcut = x
         x = self.norm1(x)
@@ -280,6 +275,11 @@ class SwinTransformerBlock(nn.Module):
         pad_b = (self.window_size - H % self.window_size) % self.window_size
         x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b))
         _, Hp, Wp, _ = x.shape
+
+        if self.shift_size > 0:
+            attn_mask = self.shift_window_attn_mask(Hp, Wp).to(x.device)
+        else:
+            attn_mask = None
 
         # cyclic shift
         if self.shift_size > 0:
@@ -443,7 +443,7 @@ class BasicLayer(nn.Module):
         # x: shape (B, H, W, C)
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x)
+                x = torch.utils.checkpoint.checkpoint(blk, x)
             else:
                 x = blk(x)
         if self.downsample is not None:
