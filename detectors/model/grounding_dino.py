@@ -14,7 +14,11 @@ from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAtte
 from typing import Optional, List, Dict
 import warnings
 
-import MultiScaleDeformableAttention as MSDA
+from modules.multiscale_deform_attn.ms_deform_attn import MSDeformAttn
+from modules.normalization import FrozenBatchNorm2d
+from classifiers.model.swin_transformer import SwinTransformerBlock
+from detectors.model.detr import _get_activation_fn, PositionEmbeddingSine2D, PositionEmbeddingLearned
+from detectors.model.deformable_detr import DeformableTransformerEncoderLayer
 
 
 class NestedTensor(object):
@@ -124,333 +128,6 @@ def _max_by_axis(the_list):
         for index, item in enumerate(sublist):
             maxes[index] = max(maxes[index], item)
     return maxes
-
-
-class GroundingDINO(nn.Module):
-    """This is the Cross-Attention Detector module that performs object detection"""
-
-    def __init__(
-        self,
-        backbone,
-        transformer,
-        num_queries,
-        aux_loss=False,
-        iter_update=False,
-        query_dim=2,
-        num_feature_levels=1,
-        nheads=8,
-        # two stage
-        two_stage_type="no",  # ['no', 'standard']
-        dec_pred_bbox_embed_share=True,
-        two_stage_class_embed_share=True,
-        two_stage_bbox_embed_share=True,
-        num_patterns=0,
-        dn_number=100,
-        dn_box_noise_scale=0.4,
-        dn_label_noise_ratio=0.5,
-        dn_labelbook_size=100,
-        text_encoder_type="bert-base-uncased",
-        sub_sentence_present=True,
-        max_text_len=256,
-    ):
-        """Initializes the model.
-        Parameters:
-            backbone: torch module of the backbone to be used. See backbone.py
-            transformer: torch module of the transformer architecture. See transformer.py
-            num_queries: number of object queries, ie detection slot. This is the maximal number of objects
-                         Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
-            aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
-        """
-        super().__init__()
-        self.num_queries = num_queries
-        self.transformer = transformer
-        self.hidden_dim = hidden_dim = transformer.d_model
-        self.num_feature_levels = num_feature_levels
-        self.nheads = nheads
-        self.max_text_len = 256
-        self.sub_sentence_present = sub_sentence_present
-
-        # setting query dim
-        self.query_dim = query_dim
-        assert query_dim == 4
-
-        # for dn training
-        self.num_patterns = num_patterns
-        self.dn_number = dn_number
-        self.dn_box_noise_scale = dn_box_noise_scale
-        self.dn_label_noise_ratio = dn_label_noise_ratio
-        self.dn_labelbook_size = dn_labelbook_size
-
-        # bert
-        self.tokenizer = get_tokenlizer(text_encoder_type)
-        self.bert = get_pretrained_language_model(text_encoder_type)
-        self.bert.pooler.dense.weight.requires_grad_(False)
-        self.bert.pooler.dense.bias.requires_grad_(False)
-        self.bert = BertModelWarper(bert_model=self.bert)
-
-        self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
-        nn.init.constant_(self.feat_map.bias.data, 0)
-        nn.init.xavier_uniform_(self.feat_map.weight.data)
-        # freeze
-
-        # special tokens
-        self.specical_tokens = self.tokenizer.convert_tokens_to_ids(["[CLS]", "[SEP]", ".", "?"])
-
-        # prepare input projection layers
-        if num_feature_levels > 1:
-            num_backbone_outs = len(backbone.num_channels)
-            input_proj_list = []
-            for _ in range(num_backbone_outs):
-                in_channels = backbone.num_channels[_]
-                input_proj_list.append(
-                    nn.Sequential(
-                        nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
-                        nn.GroupNorm(32, hidden_dim),
-                    )
-                )
-            for _ in range(num_feature_levels - num_backbone_outs):
-                input_proj_list.append(
-                    nn.Sequential(
-                        nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
-                        nn.GroupNorm(32, hidden_dim),
-                    )
-                )
-                in_channels = hidden_dim
-            self.input_proj = nn.ModuleList(input_proj_list)
-        else:
-            assert two_stage_type == "no", "two_stage_type should be no if num_feature_levels=1 !!!"
-            self.input_proj = nn.ModuleList(
-                [
-                    nn.Sequential(
-                        nn.Conv2d(backbone.num_channels[-1], hidden_dim, kernel_size=1),
-                        nn.GroupNorm(32, hidden_dim),
-                    )
-                ]
-            )
-
-        self.backbone = backbone
-        self.aux_loss = aux_loss
-        self.box_pred_damping = box_pred_damping = None
-
-        self.iter_update = iter_update
-        assert iter_update, "Why not iter_update?"
-
-        # prepare pred layers
-        self.dec_pred_bbox_embed_share = dec_pred_bbox_embed_share
-        # prepare class & box embed
-        _class_embed = ContrastiveEmbed()
-
-        _bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
-
-        if dec_pred_bbox_embed_share:
-            box_embed_layerlist = [_bbox_embed for i in range(transformer.num_decoder_layers)]
-        else:
-            box_embed_layerlist = [
-                copy.deepcopy(_bbox_embed) for i in range(transformer.num_decoder_layers)
-            ]
-        class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
-        self.bbox_embed = nn.ModuleList(box_embed_layerlist)
-        self.class_embed = nn.ModuleList(class_embed_layerlist)
-        self.transformer.decoder.bbox_embed = self.bbox_embed
-        self.transformer.decoder.class_embed = self.class_embed
-
-        # two stage
-        self.two_stage_type = two_stage_type
-        assert two_stage_type in ["no", "standard"], "unknown param {} of two_stage_type".format(
-            two_stage_type
-        )
-        if two_stage_type != "no":
-            if two_stage_bbox_embed_share:
-                assert dec_pred_bbox_embed_share
-                self.transformer.enc_out_bbox_embed = _bbox_embed
-            else:
-                self.transformer.enc_out_bbox_embed = copy.deepcopy(_bbox_embed)
-
-            if two_stage_class_embed_share:
-                assert dec_pred_bbox_embed_share
-                self.transformer.enc_out_class_embed = _class_embed
-            else:
-                self.transformer.enc_out_class_embed = copy.deepcopy(_class_embed)
-
-            self.refpoint_embed = None
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        # init input_proj
-        for proj in self.input_proj:
-            nn.init.xavier_uniform_(proj[0].weight, gain=1)
-            nn.init.constant_(proj[0].bias, 0)
-
-    def set_image_tensor(self, samples: NestedTensor):
-        if isinstance(samples, (list, torch.Tensor)):
-            samples = nested_tensor_from_tensor_list(samples)
-        self.features, self.poss = self.backbone(samples)
-
-    def unset_image_tensor(self):
-        if hasattr(self, 'features'):
-            del self.features
-        if hasattr(self,'poss'):
-            del self.poss 
-
-    def set_image_features(self, features , poss):
-        self.features = features
-        self.poss = poss
-
-    def init_ref_points(self, use_num_queries):
-        self.refpoint_embed = nn.Embedding(use_num_queries, self.query_dim)
-
-    def forward(self, samples: NestedTensor, targets: List = None, **kw):
-        """The forward expects a NestedTensor, which consists of:
-           - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-           - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
-
-        It returns a dict with the following elements:
-           - "pred_logits": the classification logits (including no-object) for all queries.
-                            Shape= [batch_size x num_queries x num_classes]
-           - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                           (center_x, center_y, width, height). These values are normalized in [0, 1],
-                           relative to the size of each individual image (disregarding possible padding).
-                           See PostProcess for information on how to retrieve the unnormalized bounding box.
-           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                            dictionnaries containing the two above keys for each decoder layer.
-        """
-        if targets is None:
-            captions = kw["captions"]
-        else:
-            captions = [t["caption"] for t in targets]
-
-        # encoder texts
-        tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(
-            samples.device
-        )
-        (
-            text_self_attention_masks,
-            position_ids,
-            cate_to_token_mask_list,
-        ) = generate_masks_with_special_tokens_and_transfer_map(
-            tokenized, self.specical_tokens, self.tokenizer
-        )
-
-        if text_self_attention_masks.shape[1] > self.max_text_len:
-            text_self_attention_masks = text_self_attention_masks[
-                :, : self.max_text_len, : self.max_text_len
-            ]
-            position_ids = position_ids[:, : self.max_text_len]
-            tokenized["input_ids"] = tokenized["input_ids"][:, : self.max_text_len]
-            tokenized["attention_mask"] = tokenized["attention_mask"][:, : self.max_text_len]
-            tokenized["token_type_ids"] = tokenized["token_type_ids"][:, : self.max_text_len]
-
-        # extract text embeddings
-        if self.sub_sentence_present:
-            tokenized_for_encoder = {k: v for k, v in tokenized.items() if k != "attention_mask"}
-            tokenized_for_encoder["attention_mask"] = text_self_attention_masks
-            tokenized_for_encoder["position_ids"] = position_ids
-        else:
-            # import ipdb; ipdb.set_trace()
-            tokenized_for_encoder = tokenized
-
-        bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
-
-        encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
-        text_token_mask = tokenized.attention_mask.bool()  # bs, 195
-        # text_token_mask: True for nomask, False for mask
-        # text_self_attention_masks: True for nomask, False for mask
-
-        if encoded_text.shape[1] > self.max_text_len:
-            encoded_text = encoded_text[:, : self.max_text_len, :]
-            text_token_mask = text_token_mask[:, : self.max_text_len]
-            position_ids = position_ids[:, : self.max_text_len]
-            text_self_attention_masks = text_self_attention_masks[
-                :, : self.max_text_len, : self.max_text_len
-            ]
-
-        text_dict = {
-            "encoded_text": encoded_text,  # bs, 195, d_model
-            "text_token_mask": text_token_mask,  # bs, 195
-            "position_ids": position_ids,  # bs, 195
-            "text_self_attention_masks": text_self_attention_masks,  # bs, 195,195
-        }
-
-        # import ipdb; ipdb.set_trace()
-        if isinstance(samples, (list, torch.Tensor)):
-            samples = nested_tensor_from_tensor_list(samples)
-        if not hasattr(self, 'features') or not hasattr(self, 'poss'):
-            self.set_image_tensor(samples)
-
-        srcs = []
-        masks = []
-        for l, feat in enumerate(self.features):
-            src, mask = feat.decompose()
-            srcs.append(self.input_proj[l](src))
-            masks.append(mask)
-            assert mask is not None
-        if self.num_feature_levels > len(srcs):
-            _len_srcs = len(srcs)
-            for l in range(_len_srcs, self.num_feature_levels):
-                if l == _len_srcs:
-                    src = self.input_proj[l](self.features[-1].tensors)
-                else:
-                    src = self.input_proj[l](srcs[-1])
-                m = samples.mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
-                srcs.append(src)
-                masks.append(mask)
-                self.poss.append(pos_l)
-
-        input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
-            srcs, masks, input_query_bbox, self.poss, input_query_label, attn_mask, text_dict
-        )
-
-        # deformable-detr-like anchor update
-        outputs_coord_list = []
-        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
-            zip(reference[:-1], self.bbox_embed, hs)
-        ):
-            layer_delta_unsig = layer_bbox_embed(layer_hs)
-            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
-            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
-            outputs_coord_list.append(layer_outputs_unsig)
-        outputs_coord_list = torch.stack(outputs_coord_list)
-
-        # output
-        outputs_class = torch.stack(
-            [
-                layer_cls_embed(layer_hs, text_dict)
-                for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
-            ]
-        )
-        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
-
-        # # for intermediate outputs
-        # if self.aux_loss:
-        #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list)
-
-        # # for encoder output
-        # if hs_enc is not None:
-        #     # prepare intermediate outputs
-        #     interm_coord = ref_enc[-1]
-        #     interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
-        #     out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
-        #     out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
-        unset_image_tensor = kw.get('unset_image_tensor', True)
-        if unset_image_tensor:
-            self.unset_image_tensor() ## If necessary
-        return out
-
-    @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord):
-        # this is a workaround to make torchscript happy, as torchscript
-        # doesn't support dictionary with non-homogeneous values, such
-        # as a dict having both a Tensor and a list.
-        return [
-            {"pred_logits": a, "pred_boxes": b}
-            for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
-        ]
 
 
 def get_tokenlizer(text_encoder_type):
@@ -747,107 +424,13 @@ def inverse_sigmoid(x, eps=1e-3):
     return torch.log(x1 / x2)
 
 
-class PositionEmbeddingSineHW(nn.Module):
-    """
-    This is a more standard version of the position embedding, very similar to the one
-    used by the Attention is all you need paper, generalized to work on images.
-    """
-
-    def __init__(
-        self, num_pos_feats=64, temperatureH=10000, temperatureW=10000, normalize=False, scale=None
-    ):
-        super().__init__()
-        self.num_pos_feats = num_pos_feats
-        self.temperatureH = temperatureH
-        self.temperatureW = temperatureW
-        self.normalize = normalize
-        if scale is not None and normalize is False:
-            raise ValueError("normalize should be True if scale is passed")
-        if scale is None:
-            scale = 2 * math.pi
-        self.scale = scale
-    
-    def forward(self, tensor_list: NestedTensor):
-        x = tensor_list.tensors
-        mask = tensor_list.mask
-        assert mask is not None
-        not_mask = ~mask
-        y_embed = not_mask.cumsum(1, dtype=torch.float32)
-        x_embed = not_mask.cumsum(2, dtype=torch.float32)
-
-        # import ipdb; ipdb.set_trace()
-
-        if self.normalize:
-            eps = 1e-6
-            y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
-            x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
-
-        dim_tx = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
-        dim_tx = self.temperatureW ** (2 * (torch.div(dim_tx, 2, rounding_mode='floor')) / self.num_pos_feats)
-        pos_x = x_embed[:, :, :, None] / dim_tx
-
-        dim_ty = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
-        dim_ty = self.temperatureH ** (2 * (torch.div(dim_ty, 2, rounding_mode='floor')) / self.num_pos_feats)
-        pos_y = y_embed[:, :, :, None] / dim_ty
-
-        pos_x = torch.stack(
-            (pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4
-        ).flatten(3)
-        pos_y = torch.stack(
-            (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4
-        ).flatten(3)
-        pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
-
-        # import ipdb; ipdb.set_trace()
-
-        return pos
-
-
-class PositionEmbeddingLearned(nn.Module):
-    """
-    Absolute pos embedding, learned.
-    """
-
-    def __init__(self, num_pos_feats=256):
-        super().__init__()
-        self.row_embed = nn.Embedding(50, num_pos_feats)
-        self.col_embed = nn.Embedding(50, num_pos_feats)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.uniform_(self.row_embed.weight)
-        nn.init.uniform_(self.col_embed.weight)
-
-    def forward(self, tensor_list: NestedTensor):
-        x = tensor_list.tensors
-        h, w = x.shape[-2:]
-        i = torch.arange(w, device=x.device)
-        j = torch.arange(h, device=x.device)
-        x_emb = self.col_embed(i)
-        y_emb = self.row_embed(j)
-        pos = (
-            torch.cat(
-                [
-                    x_emb.unsqueeze(0).repeat(h, 1, 1),
-                    y_emb.unsqueeze(1).repeat(1, w, 1),
-                ],
-                dim=-1,
-            )
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-            .repeat(x.shape[0], 1, 1, 1)
-        )
-        return pos
-
-
 def build_position_encoding(args):
     N_steps = args.hidden_dim // 2
     if args.position_embedding in ("v2", "sine"):
         # TODO find a better way of exposing other arguments
-        position_embedding = PositionEmbeddingSineHW(
+        position_embedding = PositionEmbeddingSine2D(
             N_steps,
-            temperatureH=args.pe_temperatureH,
-            temperatureW=args.pe_temperatureW,
+            temperature=(args.pe_temperatureW, args.pe_temperatureH),
             normalize=True,
         )
     elif args.position_embedding in ("v3", "learned"):
@@ -856,46 +439,6 @@ def build_position_encoding(args):
         raise ValueError(f"not supported {args.position_embedding}")
 
     return position_embedding
-
-
-class FrozenBatchNorm2d(torch.nn.Module):
-    """
-    BatchNorm2d where the batch statistics and the affine parameters are fixed.
-
-    Copy-paste from torchvision.misc.ops with added eps before rqsrt,
-    without which any other models than torchvision.models.resnet[18,34,50,101]
-    produce nans.
-    """
-
-    def __init__(self, n):
-        super(FrozenBatchNorm2d, self).__init__()
-        self.register_buffer("weight", torch.ones(n))
-        self.register_buffer("bias", torch.zeros(n))
-        self.register_buffer("running_mean", torch.zeros(n))
-        self.register_buffer("running_var", torch.ones(n))
-
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-    ):
-        num_batches_tracked_key = prefix + "num_batches_tracked"
-        if num_batches_tracked_key in state_dict:
-            del state_dict[num_batches_tracked_key]
-
-        super(FrozenBatchNorm2d, self)._load_from_state_dict(
-            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-        )
-    
-    def forward(self, x):
-        # move reshapes to the beginning
-        # to make it fuser-friendly
-        w = self.weight.reshape(1, -1, 1, 1)
-        b = self.bias.reshape(1, -1, 1, 1)
-        rv = self.running_var.reshape(1, -1, 1, 1)
-        rm = self.running_mean.reshape(1, -1, 1, 1)
-        eps = 1e-5
-        scale = w * (rv + eps).rsqrt()
-        bias = b - rm * scale
-        return x * scale + bias
 
 
 class BackboneBase(nn.Module):
@@ -1055,282 +598,6 @@ class PatchMerging(nn.Module):
         return x
 
 
-class Mlp(nn.Module):
-    """Multilayer perceptron."""
-
-    def __init__(
-        self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0
-    ):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        self.drop = nn.Dropout(drop)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
-
-
-def window_partition(x, window_size):
-    """
-    Args:
-        x: (B, H, W, C)
-        window_size (int): window size
-    Returns:
-        windows: (num_windows*B, window_size, window_size, C)
-    """
-    B, H, W, C = x.shape
-    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    return windows
-
-
-def window_reverse(windows, window_size, H, W):
-    """
-    Args:
-        windows: (num_windows*B, window_size, window_size, C)
-        window_size (int): Window size
-        H (int): Height of image
-        W (int): Width of image
-    Returns:
-        x: (B, H, W, C)
-    """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
-    return x
-
-
-class WindowAttention(nn.Module):
-    """Window based multi-head self attention (W-MSA) module with relative position bias.
-    It supports both of shifted and non-shifted window.
-    Args:
-        dim (int): Number of input channels.
-        window_size (tuple[int]): The height and width of the window.
-        num_heads (int): Number of attention heads.
-        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
-        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set
-        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
-        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
-    """
-
-    def __init__(
-        self,
-        dim,
-        window_size,
-        num_heads,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.window_size = window_size  # Wh, Ww
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim**-0.5
-
-        # define a parameter table of relative position bias
-        self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
-        )  # 2*Wh-1 * 2*Ww-1, nH
-
-        # get pair-wise relative position index for each token inside the window
-        coords_h = torch.arange(self.window_size[0])
-        coords_w = torch.arange(self.window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
-        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
-        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
-        relative_coords[:, :, 1] += self.window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
-        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-        self.register_buffer("relative_position_index", relative_position_index)
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-        trunc_normal_(self.relative_position_bias_table, std=0.02)
-        self.softmax = nn.Softmax(dim=-1)
-    
-    def forward(self, x, mask=None):
-        """Forward function.
-        Args:
-            x: input features with shape of (num_windows*B, N, C)
-            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
-        """
-        B_, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B_, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
-
-        q = q * self.scale
-        attn = q @ k.transpose(-2, -1)
-
-        relative_position_bias = self.relative_position_bias_table[
-            self.relative_position_index.view(-1)
-        ].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1
-        )  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(
-            2, 0, 1
-        ).contiguous()  # nH, Wh*Ww, Wh*Ww
-        attn = attn + relative_position_bias.unsqueeze(0)
-
-        if mask is not None:
-            nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
-        
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
-class SwinTransformerBlock(nn.Module):
-    """Swin Transformer Block.
-    Args:
-        dim (int): Number of input channels.
-        num_heads (int): Number of attention heads.
-        window_size (int): Window size.
-        shift_size (int): Shift size for SW-MSA.
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
-        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set.
-        drop (float, optional): Dropout rate. Default: 0.0
-        attn_drop (float, optional): Attention dropout rate. Default: 0.0
-        drop_path (float, optional): Stochastic depth rate. Default: 0.0
-        act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
-        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
-    """
-
-    def __init__(
-        self,
-        dim,
-        num_heads,
-        window_size=7,
-        shift_size=0,
-        mlp_ratio=4.0,
-        qkv_bias=True,
-        qk_scale=None,
-        drop=0.0,
-        attn_drop=0.0,
-        drop_path=0.0,
-        act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.shift_size = shift_size
-        self.mlp_ratio = mlp_ratio
-        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
-
-        self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(
-            dim,
-            window_size=to_2tuple(self.window_size),
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
-            attn_drop=attn_drop,
-            proj_drop=drop,
-        )
-
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop
-        )
-
-        self.H = None
-        self.W = None
-    
-    def forward(self, x, mask_matrix):
-        """Forward function.
-        Args:
-            x: Input feature, tensor size (B, H*W, C).
-            H, W: Spatial resolution of the input feature.
-            mask_matrix: Attention mask for cyclic shift.
-        """
-        B, L, C = x.shape
-        H, W = self.H, self.W
-        assert L == H * W, "input feature has wrong size"
-
-        shortcut = x
-        x = self.norm1(x)
-        x = x.view(B, H, W, C)
-
-        # pad feature maps to multiples of window size
-        pad_l = pad_t = 0
-        pad_r = (self.window_size - W % self.window_size) % self.window_size
-        pad_b = (self.window_size - H % self.window_size) % self.window_size
-        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
-        _, Hp, Wp, _ = x.shape
-
-        # cyclic shift
-        if self.shift_size > 0:
-            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
-            attn_mask = mask_matrix
-        else:
-            shifted_x = x
-            attn_mask = None
-        
-        # partition windows
-        x_windows = window_partition(
-            shifted_x, self.window_size
-        )  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(
-            -1, self.window_size * self.window_size, C
-        )  # nW*B, window_size*window_size, C
-
-        # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
-
-        # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)  # B H' W' C
-
-        # reverse cyclic shift
-        if self.shift_size > 0:
-            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
-        else:
-            x = shifted_x
-
-        if pad_r > 0 or pad_b > 0:
-            x = x[:, :H, :W, :].contiguous()
-
-        x = x.view(B, H * W, C)
-
-        # FFN
-        x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-
-        return x
-
-
 class BasicLayer(nn.Module):
     """A basic Swin Transformer layer for one stage.
     Args:
@@ -1403,41 +670,42 @@ class BasicLayer(nn.Module):
             H, W: Spatial resolution of the input feature.
         """
 
-        # calculate attention mask for SW-MSA
-        Hp = int(np.ceil(H / self.window_size)) * self.window_size
-        Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)  # 1 Hp Wp 1
-        h_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
-        w_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
-        cnt = 0
-        for h in h_slices:
-            for w in w_slices:
-                img_mask[:, h, w, :] = cnt
-                cnt += 1
+        # # calculate attention mask for SW-MSA
+        # Hp = int(np.ceil(H / self.window_size)) * self.window_size
+        # Wp = int(np.ceil(W / self.window_size)) * self.window_size
+        # img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)  # 1 Hp Wp 1
+        # h_slices = (
+        #     slice(0, -self.window_size),
+        #     slice(-self.window_size, -self.shift_size),
+        #     slice(-self.shift_size, None),
+        # )
+        # w_slices = (
+        #     slice(0, -self.window_size),
+        #     slice(-self.window_size, -self.shift_size),
+        #     slice(-self.shift_size, None),
+        # )
+        # cnt = 0
+        # for h in h_slices:
+        #     for w in w_slices:
+        #         img_mask[:, h, w, :] = cnt
+        #         cnt += 1
 
-        mask_windows = window_partition(
-            img_mask, self.window_size
-        )  # nW, window_size, window_size, 1
-        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
-            attn_mask == 0, float(0.0)
-        )
+        # mask_windows = window_partition(
+        #     img_mask, self.window_size
+        # )  # nW, window_size, window_size, 1
+        # mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+        # attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        # attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
+        #     attn_mask == 0, float(0.0)
+        # )
 
         for blk in self.blocks:
-            blk.H, blk.W = H, W
+            x = x.view(x.size(0), H, W, x.size(2))
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, attn_mask)
+                x = checkpoint.checkpoint(blk, x)
             else:
-                x = blk(x, attn_mask)
+                x = blk(x)
+            x = x.view(x.size(0), H * W, x.size(3))
         if self.downsample is not None:
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
@@ -1846,22 +1114,6 @@ class TransformerEncoderLayer(nn.Module):
         return src
 
 
-def _get_activation_fn(activation, d_model=256, batch_dim=0):
-    """Return an activation function given a string"""
-    if activation == "relu":
-        return F.relu
-    if activation == "gelu":
-        return F.gelu
-    if activation == "glu":
-        return F.glu
-    if activation == "prelu":
-        return nn.PReLU()
-    if activation == "selu":
-        return F.selu
-
-    raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
-
-
 class BiMultiHeadAttention(nn.Module):
     def __init__(self, v_dim, l_dim, embed_dim, num_heads, dropout=0.1, cfg=None):
         super(BiMultiHeadAttention, self).__init__()
@@ -2063,333 +1315,6 @@ class BiAttentionBlock(nn.Module):
     # def forward(self, v:List[torch.Tensor], l, attention_mask_v=None, attention_mask_l=None)
 
 
-def _is_power_of_2(n):
-    if (not isinstance(n, int)) or (n < 0):
-        raise ValueError("invalid input for _is_power_of_2: {} (type: {})".format(n, type(n)))
-    return (n & (n - 1) == 0) and n != 0
-
-
-class MultiScaleDeformableAttnFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        value,
-        value_spatial_shapes,
-        value_level_start_index,
-        sampling_locations,
-        attention_weights,
-        im2col_step,
-    ):
-        ctx.im2col_step = im2col_step
-        output = MSDA.ms_deform_attn_forward(
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-            ctx.im2col_step,
-        )
-        ctx.save_for_backward(
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-        )
-        return output
-
-    @staticmethod
-    @torch.autograd.function.once_differentiable
-    def backward(ctx, grad_output):
-        (
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-        ) = ctx.saved_tensors
-        grad_value, grad_sampling_loc, grad_attn_weight = MSDA.ms_deform_attn_backward(
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-            grad_output,
-            ctx.im2col_step,
-        )
-
-        return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None
-
-
-def multi_scale_deformable_attn_pytorch(
-    value: torch.Tensor,
-    value_spatial_shapes: torch.Tensor,
-    sampling_locations: torch.Tensor,
-    attention_weights: torch.Tensor,
-) -> torch.Tensor:
-
-    bs, _, num_heads, embed_dims = value.shape
-    _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
-    value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes], dim=1)
-    sampling_grids = 2 * sampling_locations - 1
-    sampling_value_list = []
-    for level, (H_, W_) in enumerate(value_spatial_shapes):
-        # bs, H_*W_, num_heads, embed_dims ->
-        # bs, H_*W_, num_heads*embed_dims ->
-        # bs, num_heads*embed_dims, H_*W_ ->
-        # bs*num_heads, embed_dims, H_, W_
-        value_l_ = (
-            value_list[level].flatten(2).transpose(1, 2).reshape(bs * num_heads, embed_dims, H_, W_)
-        )
-        # bs, num_queries, num_heads, num_points, 2 ->
-        # bs, num_heads, num_queries, num_points, 2 ->
-        # bs*num_heads, num_queries, num_points, 2
-        sampling_grid_l_ = sampling_grids[:, :, :, level].transpose(1, 2).flatten(0, 1)
-        # bs*num_heads, embed_dims, num_queries, num_points
-        sampling_value_l_ = F.grid_sample(
-            value_l_, sampling_grid_l_, mode="bilinear", padding_mode="zeros", align_corners=False
-        )
-        sampling_value_list.append(sampling_value_l_)
-    # (bs, num_queries, num_heads, num_levels, num_points) ->
-    # (bs, num_heads, num_queries, num_levels, num_points) ->
-    # (bs, num_heads, 1, num_queries, num_levels*num_points)
-    attention_weights = attention_weights.transpose(1, 2).reshape(
-        bs * num_heads, 1, num_queries, num_levels * num_points
-    )
-    output = (
-        (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)
-        .sum(-1)
-        .view(bs, num_heads * embed_dims, num_queries)
-    )
-    return output.transpose(1, 2).contiguous()
-
-
-class MultiScaleDeformableAttention(nn.Module):
-    """Multi-Scale Deformable Attention Module used in Deformable-DETR
-
-    `Deformable DETR: Deformable Transformers for End-to-End Object Detection.
-    <https://arxiv.org/pdf/2010.04159.pdf>`_.
-
-    Args:
-        embed_dim (int): The embedding dimension of Attention. Default: 256.
-        num_heads (int): The number of attention heads. Default: 8.
-        num_levels (int): The number of feature map used in Attention. Default: 4.
-        num_points (int): The number of sampling points for each query
-            in each head. Default: 4.
-        img2col_steps (int): The step used in image_to_column. Defualt: 64.
-            dropout (float): Dropout layer used in output. Default: 0.1.
-        batch_first (bool): if ``True``, then the input and output tensor will be
-            provided as `(bs, n, embed_dim)`. Default: False. `(n, bs, embed_dim)`
-    """
-
-    def __init__(
-        self,
-        embed_dim: int = 256,
-        num_heads: int = 8,
-        num_levels: int = 4,
-        num_points: int = 4,
-        img2col_step: int = 64,
-        batch_first: bool = False,
-    ):
-        super().__init__()
-        if embed_dim % num_heads != 0:
-            raise ValueError(
-                "embed_dim must be divisible by num_heads, but got {} and {}".format(
-                    embed_dim, num_heads
-                )
-            )
-        head_dim = embed_dim // num_heads
-
-        self.batch_first = batch_first
-
-        if not _is_power_of_2(head_dim):
-            warnings.warn(
-                """
-                You'd better set d_model in MSDeformAttn to make sure that
-                each dim of the attention head a power of 2, which is more efficient.
-                """
-            )
-
-        self.im2col_step = img2col_step
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.num_levels = num_levels
-        self.num_points = num_points
-        self.sampling_offsets = nn.Linear(embed_dim, num_heads * num_levels * num_points * 2)
-        self.attention_weights = nn.Linear(embed_dim, num_heads * num_levels * num_points)
-        self.value_proj = nn.Linear(embed_dim, embed_dim)
-        self.output_proj = nn.Linear(embed_dim, embed_dim)
-
-        self.init_weights()
-
-    def _reset_parameters(self):
-        return self.init_weights()
-
-    def init_weights(self):
-        """
-        Default initialization for Parameters of Module.
-        """
-        nn.init.constant_(self.sampling_offsets.weight.data, 0.0)
-        thetas = torch.arange(self.num_heads, dtype=torch.float32) * (
-            2.0 * math.pi / self.num_heads
-        )
-        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
-        grid_init = (
-            (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
-            .view(self.num_heads, 1, 1, 2)
-            .repeat(1, self.num_levels, self.num_points, 1)
-        )
-        for i in range(self.num_points):
-            grid_init[:, :, i, :] *= i + 1
-        with torch.no_grad():
-            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-        nn.init.constant_(self.attention_weights.weight.data, 0.0)
-        nn.init.constant_(self.attention_weights.bias.data, 0.0)
-        nn.init.xavier_uniform_(self.value_proj.weight.data)
-        nn.init.constant_(self.value_proj.bias.data, 0.0)
-        nn.init.xavier_uniform_(self.output_proj.weight.data)
-        nn.init.constant_(self.output_proj.bias.data, 0.0)
-
-    def freeze_sampling_offsets(self):
-        print("Freeze sampling offsets")
-        self.sampling_offsets.weight.requires_grad = False
-        self.sampling_offsets.bias.requires_grad = False
-
-    def freeze_attention_weights(self):
-        print("Freeze attention weights")
-        self.attention_weights.weight.requires_grad = False
-        self.attention_weights.bias.requires_grad = False
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        value: Optional[torch.Tensor] = None,
-        query_pos: Optional[torch.Tensor] = None,
-        key_padding_mask: Optional[torch.Tensor] = None,
-        reference_points: Optional[torch.Tensor] = None,
-        spatial_shapes: Optional[torch.Tensor] = None,
-        level_start_index: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> torch.Tensor:
-
-        """Forward Function of MultiScaleDeformableAttention
-
-        Args:
-            query (torch.Tensor): Query embeddings with shape
-                `(num_query, bs, embed_dim)`
-            key (torch.Tensor): Key embeddings with shape
-                `(num_key, bs, embed_dim)`
-            value (torch.Tensor): Value embeddings with shape
-                `(num_key, bs, embed_dim)`
-            query_pos (torch.Tensor): The position embedding for `query`. Default: None.
-            key_padding_mask (torch.Tensor): ByteTensor for `query`, with shape `(bs, num_key)`,
-                indicating which elements within `key` to be ignored in attention.
-            reference_points (torch.Tensor): The normalized reference points
-                with shape `(bs, num_query, num_levels, 2)`,
-                all elements is range in [0, 1], top-left (0, 0),
-                bottom-right (1, 1), including padding are.
-                or `(N, Length_{query}, num_levels, 4)`, add additional
-                two dimensions `(h, w)` to form reference boxes.
-            spatial_shapes (torch.Tensor): Spatial shape of features in different levels.
-                With shape `(num_levels, 2)`, last dimension represents `(h, w)`.
-            level_start_index (torch.Tensor): The start index of each level. A tensor with
-                shape `(num_levels, )` which can be represented as
-                `[0, h_0 * w_0, h_0 * w_0 + h_1 * w_1, ...]`.
-
-        Returns:
-            torch.Tensor: forward results with shape `(num_query, bs, embed_dim)`
-        """
-
-        if value is None:
-            value = query
-
-        if query_pos is not None:
-            query = query + query_pos
-
-        if not self.batch_first:
-            # change to (bs, num_query ,embed_dims)
-            query = query.permute(1, 0, 2)
-            value = value.permute(1, 0, 2)
-
-        bs, num_query, _ = query.shape
-        bs, num_value, _ = value.shape
-
-        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
-
-        value = self.value_proj(value)
-        if key_padding_mask is not None:
-            value = value.masked_fill(key_padding_mask[..., None], float(0))
-        value = value.view(bs, num_value, self.num_heads, -1)
-        sampling_offsets = self.sampling_offsets(query).view(
-            bs, num_query, self.num_heads, self.num_levels, self.num_points, 2
-        )
-        attention_weights = self.attention_weights(query).view(
-            bs, num_query, self.num_heads, self.num_levels * self.num_points
-        )
-        attention_weights = attention_weights.softmax(-1)
-        attention_weights = attention_weights.view(
-            bs,
-            num_query,
-            self.num_heads,
-            self.num_levels,
-            self.num_points,
-        )
-
-        # bs, num_query, num_heads, num_levels, num_points, 2
-        if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
-            sampling_locations = (
-                reference_points[:, :, None, :, None, :]
-                + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
-            )
-        elif reference_points.shape[-1] == 4:
-            sampling_locations = (
-                reference_points[:, :, None, :, None, :2]
-                + sampling_offsets
-                / self.num_points
-                * reference_points[:, :, None, :, None, 2:]
-                * 0.5
-            )
-        else:
-            raise ValueError(
-                "Last dim of reference_points must be 2 or 4, but get {} instead.".format(
-                    reference_points.shape[-1]
-                )
-            )
-    
-        if torch.cuda.is_available() and value.is_cuda:
-            halffloat = False
-            if value.dtype == torch.float16:
-                halffloat = True
-                value = value.float()
-                sampling_locations = sampling_locations.float()
-                attention_weights = attention_weights.float()
-
-            output = MultiScaleDeformableAttnFunction.apply(
-                value,
-                spatial_shapes,
-                level_start_index,
-                sampling_locations,
-                attention_weights,
-                self.im2col_step,
-            )
-
-            if halffloat:
-                output = output.half()
-        else:
-            output = multi_scale_deformable_attn_pytorch(
-                value, spatial_shapes, sampling_locations, attention_weights
-            )
-
-        output = self.output_proj(output)
-
-        if not self.batch_first:
-            output = output.permute(1, 0, 2)
-
-        return output
-
-
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -2544,7 +1469,7 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         for m in self.modules():
-            if isinstance(m, MultiScaleDeformableAttention):
+            if isinstance(m, MSDeformAttn):
                 m._reset_parameters()
         if self.num_feature_levels > 1 and self.level_embed is not None:
             nn.init.normal_(self.level_embed)
@@ -3220,70 +2145,6 @@ class TransformerDecoder(nn.Module):
         ]
 
 
-class DeformableTransformerEncoderLayer(nn.Module):
-    def __init__(
-        self,
-        d_model=256,
-        d_ffn=1024,
-        dropout=0.1,
-        activation="relu",
-        n_levels=4,
-        n_heads=8,
-        n_points=4,
-    ):
-        super().__init__()
-
-        # self attention
-        self.self_attn = MultiScaleDeformableAttention(
-            embed_dim=d_model,
-            num_levels=n_levels,
-            num_heads=n_heads,
-            num_points=n_points,
-            batch_first=True,
-        )
-        self.dropout1 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-
-        # ffn
-        self.linear1 = nn.Linear(d_model, d_ffn)
-        self.activation = _get_activation_fn(activation, d_model=d_ffn)
-        self.dropout2 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ffn, d_model)
-        self.dropout3 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(d_model)
-
-    @staticmethod
-    def with_pos_embed(tensor, pos):
-        return tensor if pos is None else tensor + pos
-
-    def forward_ffn(self, src):
-        src2 = self.linear2(self.dropout2(self.activation(self.linear1(src))))
-        src = src + self.dropout3(src2)
-        src = self.norm2(src)
-        return src
-
-    def forward(
-        self, src, pos, reference_points, spatial_shapes, level_start_index, key_padding_mask=None
-    ):
-        # self attention
-        # import ipdb; ipdb.set_trace()
-        src2 = self.self_attn(
-            query=self.with_pos_embed(src, pos),
-            reference_points=reference_points,
-            value=src,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            key_padding_mask=key_padding_mask,
-        )
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
-
-        # ffn
-        src = self.forward_ffn(src)
-
-        return src
-
-
 class DeformableTransformerDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -3300,12 +2161,11 @@ class DeformableTransformerDecoderLayer(nn.Module):
         super().__init__()
 
         # cross attention
-        self.cross_attn = MultiScaleDeformableAttention(
+        self.cross_attn = MSDeformAttn(
             embed_dim=d_model,
             num_levels=n_levels,
             num_heads=n_heads,
             num_points=n_points,
-            batch_first=True,
         )
         self.dropout1 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.norm1 = nn.LayerNorm(d_model)
@@ -3323,7 +2183,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
         # ffn
         self.linear1 = nn.Linear(d_model, d_ffn)
-        self.activation = _get_activation_fn(activation, d_model=d_ffn, batch_dim=1)
+        self.activation = _get_activation_fn(activation)
         self.dropout3 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.linear2 = nn.Linear(d_ffn, d_model)
         self.dropout4 = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -3398,10 +2258,10 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt2 = self.cross_attn(
             query=self.with_pos_embed(tgt, tgt_query_pos).transpose(0, 1),
             reference_points=tgt_reference_points.transpose(0, 1).contiguous(),
-            value=memory.transpose(0, 1),
-            spatial_shapes=memory_spatial_shapes,
-            level_start_index=memory_level_start_index,
-            key_padding_mask=memory_key_padding_mask,
+            input_flatten=memory.transpose(0, 1),
+            input_spatial_shapes=memory_spatial_shapes,
+            input_level_start_index=memory_level_start_index,
+            input_padding_mask=memory_key_padding_mask,
         ).transpose(0, 1)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
@@ -3444,14 +2304,335 @@ def build_transformer(args):
     )
 
 
+class GroundingDINO(nn.Module):
+    """This is the Cross-Attention Detector module that performs object detection"""
+
+    def __init__(
+        self,
+        backbone,
+        transformer,
+        num_queries,
+        aux_loss=False,
+        iter_update=False,
+        query_dim=2,
+        num_feature_levels=1,
+        nheads=8,
+        # two stage
+        two_stage_type="no",  # ['no', 'standard']
+        dec_pred_bbox_embed_share=True,
+        two_stage_class_embed_share=True,
+        two_stage_bbox_embed_share=True,
+        num_patterns=0,
+        dn_number=100,
+        dn_box_noise_scale=0.4,
+        dn_label_noise_ratio=0.5,
+        dn_labelbook_size=100,
+        text_encoder_type="bert-base-uncased",
+        sub_sentence_present=True,
+        max_text_len=256,
+    ):
+        """Initializes the model.
+        Parameters:
+            backbone: torch module of the backbone to be used. See backbone.py
+            transformer: torch module of the transformer architecture. See transformer.py
+            num_queries: number of object queries, ie detection slot. This is the maximal number of objects
+                         Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
+            aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
+        """
+        super().__init__()
+        self.num_queries = num_queries
+        self.transformer = transformer
+        self.hidden_dim = hidden_dim = transformer.d_model
+        self.num_feature_levels = num_feature_levels
+        self.nheads = nheads
+        self.max_text_len = 256
+        self.sub_sentence_present = sub_sentence_present
+
+        # setting query dim
+        self.query_dim = query_dim
+        assert query_dim == 4
+
+        # for dn training
+        self.num_patterns = num_patterns
+        self.dn_number = dn_number
+        self.dn_box_noise_scale = dn_box_noise_scale
+        self.dn_label_noise_ratio = dn_label_noise_ratio
+        self.dn_labelbook_size = dn_labelbook_size
+
+        # bert
+        self.tokenizer = get_tokenlizer(text_encoder_type)
+        self.bert = get_pretrained_language_model(text_encoder_type)
+        self.bert.pooler.dense.weight.requires_grad_(False)
+        self.bert.pooler.dense.bias.requires_grad_(False)
+        self.bert = BertModelWarper(bert_model=self.bert)
+
+        self.feat_map = nn.Linear(self.bert.config.hidden_size, self.hidden_dim, bias=True)
+        nn.init.constant_(self.feat_map.bias.data, 0)
+        nn.init.xavier_uniform_(self.feat_map.weight.data)
+        # freeze
+
+        # special tokens
+        self.specical_tokens = self.tokenizer.convert_tokens_to_ids(["[CLS]", "[SEP]", ".", "?"])
+
+        # prepare input projection layers
+        if num_feature_levels > 1:
+            num_backbone_outs = len(backbone.num_channels)
+            input_proj_list = []
+            for _ in range(num_backbone_outs):
+                in_channels = backbone.num_channels[_]
+                input_proj_list.append(
+                    nn.Sequential(
+                        nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
+                        nn.GroupNorm(32, hidden_dim),
+                    )
+                )
+            for _ in range(num_feature_levels - num_backbone_outs):
+                input_proj_list.append(
+                    nn.Sequential(
+                        nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
+                        nn.GroupNorm(32, hidden_dim),
+                    )
+                )
+                in_channels = hidden_dim
+            self.input_proj = nn.ModuleList(input_proj_list)
+        else:
+            assert two_stage_type == "no", "two_stage_type should be no if num_feature_levels=1 !!!"
+            self.input_proj = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Conv2d(backbone.num_channels[-1], hidden_dim, kernel_size=1),
+                        nn.GroupNorm(32, hidden_dim),
+                    )
+                ]
+            )
+
+        self.backbone = backbone
+        self.aux_loss = aux_loss
+        self.box_pred_damping = box_pred_damping = None
+
+        self.iter_update = iter_update
+        assert iter_update, "Why not iter_update?"
+
+        # prepare pred layers
+        self.dec_pred_bbox_embed_share = dec_pred_bbox_embed_share
+        # prepare class & box embed
+        _class_embed = ContrastiveEmbed()
+
+        _bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        nn.init.constant_(_bbox_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(_bbox_embed.layers[-1].bias.data, 0)
+
+        if dec_pred_bbox_embed_share:
+            box_embed_layerlist = [_bbox_embed for i in range(transformer.num_decoder_layers)]
+        else:
+            box_embed_layerlist = [
+                copy.deepcopy(_bbox_embed) for i in range(transformer.num_decoder_layers)
+            ]
+        class_embed_layerlist = [_class_embed for i in range(transformer.num_decoder_layers)]
+        self.bbox_embed = nn.ModuleList(box_embed_layerlist)
+        self.class_embed = nn.ModuleList(class_embed_layerlist)
+        self.transformer.decoder.bbox_embed = self.bbox_embed
+        self.transformer.decoder.class_embed = self.class_embed
+
+        # two stage
+        self.two_stage_type = two_stage_type
+        assert two_stage_type in ["no", "standard"], "unknown param {} of two_stage_type".format(
+            two_stage_type
+        )
+        if two_stage_type != "no":
+            if two_stage_bbox_embed_share:
+                assert dec_pred_bbox_embed_share
+                self.transformer.enc_out_bbox_embed = _bbox_embed
+            else:
+                self.transformer.enc_out_bbox_embed = copy.deepcopy(_bbox_embed)
+
+            if two_stage_class_embed_share:
+                assert dec_pred_bbox_embed_share
+                self.transformer.enc_out_class_embed = _class_embed
+            else:
+                self.transformer.enc_out_class_embed = copy.deepcopy(_class_embed)
+
+            self.refpoint_embed = None
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        # init input_proj
+        for proj in self.input_proj:
+            nn.init.xavier_uniform_(proj[0].weight, gain=1)
+            nn.init.constant_(proj[0].bias, 0)
+
+    def set_image_tensor(self, samples: NestedTensor):
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
+        self.features, self.poss = self.backbone(samples)
+
+    def unset_image_tensor(self):
+        if hasattr(self, 'features'):
+            del self.features
+        if hasattr(self,'poss'):
+            del self.poss 
+
+    def set_image_features(self, features , poss):
+        self.features = features
+        self.poss = poss
+
+    def init_ref_points(self, use_num_queries):
+        self.refpoint_embed = nn.Embedding(use_num_queries, self.query_dim)
+
+    def forward(self, samples: NestedTensor, targets: List = None, **kw):
+        """The forward expects a NestedTensor, which consists of:
+           - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
+           - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+
+        It returns a dict with the following elements:
+           - "pred_logits": the classification logits (including no-object) for all queries.
+                            Shape= [batch_size x num_queries x num_classes]
+           - "pred_boxes": The normalized boxes coordinates for all queries, represented as
+                           (center_x, center_y, width, height). These values are normalized in [0, 1],
+                           relative to the size of each individual image (disregarding possible padding).
+                           See PostProcess for information on how to retrieve the unnormalized bounding box.
+           - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
+                            dictionnaries containing the two above keys for each decoder layer.
+        """
+        if targets is None:
+            captions = kw["captions"]
+        else:
+            captions = [t["caption"] for t in targets]
+
+        # encoder texts
+        tokenized = self.tokenizer(captions, padding="longest", return_tensors="pt").to(samples.device)
+        (
+            text_self_attention_masks,
+            position_ids,
+            cate_to_token_mask_list,
+        ) = generate_masks_with_special_tokens_and_transfer_map(
+            tokenized, self.specical_tokens, self.tokenizer
+        )
+
+        if text_self_attention_masks.shape[1] > self.max_text_len:
+            text_self_attention_masks = text_self_attention_masks[
+                :, : self.max_text_len, : self.max_text_len
+            ]
+            position_ids = position_ids[:, : self.max_text_len]
+            tokenized["input_ids"] = tokenized["input_ids"][:, : self.max_text_len]
+            tokenized["attention_mask"] = tokenized["attention_mask"][:, : self.max_text_len]
+            tokenized["token_type_ids"] = tokenized["token_type_ids"][:, : self.max_text_len]
+
+        # extract text embeddings
+        if self.sub_sentence_present:
+            tokenized_for_encoder = {k: v for k, v in tokenized.items() if k != "attention_mask"}
+            tokenized_for_encoder["attention_mask"] = text_self_attention_masks
+            tokenized_for_encoder["position_ids"] = position_ids
+        else:
+            # import ipdb; ipdb.set_trace()
+            tokenized_for_encoder = tokenized
+
+        bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
+
+        encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
+        text_token_mask = tokenized.attention_mask.bool()  # bs, 195
+        # text_token_mask: True for nomask, False for mask
+        # text_self_attention_masks: True for nomask, False for mask
+
+        if encoded_text.shape[1] > self.max_text_len:
+            encoded_text = encoded_text[:, : self.max_text_len, :]
+            text_token_mask = text_token_mask[:, : self.max_text_len]
+            position_ids = position_ids[:, : self.max_text_len]
+            text_self_attention_masks = text_self_attention_masks[
+                :, : self.max_text_len, : self.max_text_len
+            ]
+
+        text_dict = {
+            "encoded_text": encoded_text,  # bs, 195, d_model
+            "text_token_mask": text_token_mask,  # bs, 195
+            "position_ids": position_ids,  # bs, 195
+            "text_self_attention_masks": text_self_attention_masks,  # bs, 195,195
+        }
+
+        # import ipdb; ipdb.set_trace()
+        if isinstance(samples, (list, torch.Tensor)):
+            samples = nested_tensor_from_tensor_list(samples)
+        if not hasattr(self, 'features') or not hasattr(self, 'poss'):
+            self.set_image_tensor(samples)
+
+        srcs = []
+        masks = []
+        for l, feat in enumerate(self.features):
+            src, mask = feat.decompose()
+            srcs.append(self.input_proj[l](src))
+            masks.append(mask)
+            assert mask is not None
+        if self.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
+            for l in range(_len_srcs, self.num_feature_levels):
+                if l == _len_srcs:
+                    src = self.input_proj[l](self.features[-1].tensors)
+                else:
+                    src = self.input_proj[l](srcs[-1])
+                m = samples.mask
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                srcs.append(src)
+                masks.append(mask)
+                self.poss.append(pos_l)
+
+        input_query_bbox = input_query_label = attn_mask = dn_meta = None
+        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
+            srcs, masks, input_query_bbox, self.poss, input_query_label, attn_mask, text_dict
+        )
+
+        # deformable-detr-like anchor update
+        outputs_coord_list = []
+        for dec_lid, (layer_ref_sig, layer_bbox_embed, layer_hs) in enumerate(
+            zip(reference[:-1], self.bbox_embed, hs)
+        ):
+            layer_delta_unsig = layer_bbox_embed(layer_hs)
+            layer_outputs_unsig = layer_delta_unsig + inverse_sigmoid(layer_ref_sig)
+            layer_outputs_unsig = layer_outputs_unsig.sigmoid()
+            outputs_coord_list.append(layer_outputs_unsig)
+        outputs_coord_list = torch.stack(outputs_coord_list)
+
+        # output
+        outputs_class = torch.stack(
+            [
+                layer_cls_embed(layer_hs, text_dict)
+                for layer_cls_embed, layer_hs in zip(self.class_embed, hs)
+            ]
+        )
+        out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
+
+        # # for intermediate outputs
+        # if self.aux_loss:
+        #     out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord_list)
+
+        # # for encoder output
+        # if hs_enc is not None:
+        #     # prepare intermediate outputs
+        #     interm_coord = ref_enc[-1]
+        #     interm_class = self.transformer.enc_out_class_embed(hs_enc[-1], text_dict)
+        #     out['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
+        #     out['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
+        unset_image_tensor = kw.get('unset_image_tensor', True)
+        if unset_image_tensor:
+            self.unset_image_tensor() ## If necessary
+        return out
+
+    @torch.jit.unused
+    def _set_aux_loss(self, outputs_class, outputs_coord):
+        # this is a workaround to make torchscript happy, as torchscript
+        # doesn't support dictionary with non-homogeneous values, such
+        # as a dict having both a Tensor and a list.
+        return [
+            {"pred_logits": a, "pred_boxes": b}
+            for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
+        ]
+
+
 def build_groundingdino(args):
 
     backbone = build_backbone(args)
     transformer = build_transformer(args)
-
-    dn_labelbook_size = args.dn_labelbook_size
-    dec_pred_bbox_embed_share = args.dec_pred_bbox_embed_share
-    sub_sentence_present = args.sub_sentence_present
 
     model = GroundingDINO(
         backbone,
@@ -3462,7 +2643,7 @@ def build_groundingdino(args):
         query_dim=4,
         num_feature_levels=args.num_feature_levels,
         nheads=args.nheads,
-        dec_pred_bbox_embed_share=dec_pred_bbox_embed_share,
+        dec_pred_bbox_embed_share=args.dec_pred_bbox_embed_share,
         two_stage_type=args.two_stage_type,
         two_stage_bbox_embed_share=args.two_stage_bbox_embed_share,
         two_stage_class_embed_share=args.two_stage_class_embed_share,
@@ -3470,9 +2651,9 @@ def build_groundingdino(args):
         dn_number=0,
         dn_box_noise_scale=args.dn_box_noise_scale,
         dn_label_noise_ratio=args.dn_label_noise_ratio,
-        dn_labelbook_size=dn_labelbook_size,
+        dn_labelbook_size=args.dn_labelbook_size,
         text_encoder_type=args.text_encoder_type,
-        sub_sentence_present=sub_sentence_present,
+        sub_sentence_present=args.sub_sentence_present,
         max_text_len=args.max_text_len,
     )
 
