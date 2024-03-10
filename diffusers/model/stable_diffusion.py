@@ -124,15 +124,15 @@ class StableDiffusion(nn.Module):
     
     def encode_prompt(self, pos_prompts: List[str], neg_prompts: List[str] = None):
         text_inputs = self.tokenizer(pos_prompts, padding='max_length', truncation=True, return_tensors='pt')
-        text_input_ids = text_inputs.input_ids
-        attention_mask = text_inputs.attention_mask
-        pos_prompt_embeds = self.text_encoder(text_input_ids, attention_mask=attention_mask)[0]
+        input_ids = text_inputs.input_ids.to(self.device)
+        attention_mask = text_inputs.attention_mask.to(self.device)
+        pos_prompt_embeds = self.text_encoder(input_ids, attention_mask=attention_mask)[0]
         if neg_prompts is None:
             neg_prompts = [''] * len(pos_prompts)
         neg_text_inputs = self.tokenizer(neg_prompts, padding='max_length', truncation=True, return_tensors='pt')
-        neg_text_input_ids = neg_text_inputs.input_ids
-        attention_mask = neg_text_inputs.attention_mask
-        neg_prompt_embeds = self.text_encoder(neg_text_input_ids, attention_mask=attention_mask)[0]
+        input_ids = neg_text_inputs.input_ids.to(self.device)
+        attention_mask = neg_text_inputs.attention_mask.to(self.device)
+        neg_prompt_embeds = self.text_encoder(input_ids, attention_mask=attention_mask)[0]
         return pos_prompt_embeds, neg_prompt_embeds
     
     def encode_image(self, images: torch.Tensor):
