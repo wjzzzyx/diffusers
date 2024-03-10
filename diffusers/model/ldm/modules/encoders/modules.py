@@ -483,8 +483,8 @@ class FrozenCLIPT5Encoder(AbstractEncoder):
         return [clip_z, t5_z]
 
 
-from ldm.modules.diffusionmodules.upscaling import ImageConcatWithNoiseAugmentation
-from ldm.modules.diffusionmodules.openaimodel import Timestep
+from diffusers.model.ldm.modules.diffusionmodules.upscaling import ImageConcatWithNoiseAugmentation
+from diffusers.model.ldm.modules.diffusionmodules.openaimodel import Timestep
 
 
 class CLIPEmbeddingNoiseAugmentation(ImageConcatWithNoiseAugmentation):
