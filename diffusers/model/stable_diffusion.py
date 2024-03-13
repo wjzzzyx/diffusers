@@ -145,6 +145,7 @@ class StableDiffusion(nn.Module):
 class StableDiffusion_StabilityAI(nn.Module):
     """A custom version of StabilityAI Stable Diffusion Model"""
     def __init__(self, model_config):
+        super().__init__()
         self.prediction_type = model_config.prediction_type
         self.scale_factor = model_config.scale_factor
 
