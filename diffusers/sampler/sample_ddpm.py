@@ -3,6 +3,7 @@ import torch
 from typing import Dict, Sequence
 
 from . import schedule
+from diffusers.sampler.denoiser import DiscreteTimestepsDenoiser, DiscreteTimestepsVDenoiser, CFGDenoiser
 
 
 class DDPMSampler():
@@ -28,6 +29,17 @@ class DDPMSampler():
         self.timesteps = range(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
         self.timesteps = self.timesteps[::-1]
     
+    def get_denoiser(self, model):
+        if model.prediction_type == 'epsilon':
+            denoiser = DiscreteTimestepsDenoiser(model, self.alphas_cumprod)
+        elif model.prediction_type  == 'v_prediction':
+            denoiser = DiscreteTimestepsVDenoiser(model, self.alphas_cumprod)
+        else:
+            raise NotImplementedError()
+        if self.cfg_scale > 1:
+            denoiser = CFGDenoiser(denoiser, self.cfg_scale)
+        return denoiser
+
     def step(self, output: Dict[str, torch.Tensor], t: int, sample: torch.Tensor, generator = None):
         """
         Args:
@@ -52,7 +64,7 @@ class DDPMSampler():
             # variance type fixed_small
             variance = (1 - alpha_cumprod_t_next) * (1 - alpha_t) / (1 - alpha_cumprod_t)
             variance = torch.clamp(variance, min=1e-20)
-            variance = torch.sqrt(variance) * torch.randn(sample.shape, generator=generator)
+            variance = torch.sqrt(variance) * torch.randn(sample.shape, generator=generator, device=sample.device)
         else:
             variance = 0
         sample_next = pred_cur_mean + variance
