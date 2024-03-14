@@ -3,7 +3,7 @@ from typing import Sequence
 
 from diffusers import k_diffusion
 from diffusers.sampler import schedule
-from diffusers.sampler.denoiser import CFGDenoiser
+from diffusers.sampler.denoiser import K_CFGDenoiser
 
 
 class EulerSampler():
@@ -59,7 +59,7 @@ class EulerSampler():
         else:
             raise NotImplementedError()
         if self.cfg_scale > 1:
-            denoiser = CFGDenoiser(denoiser, self.cfg_scale)
+            denoiser = K_CFGDenoiser(denoiser, self.cfg_scale)
         return denoiser
     
     def sample(
