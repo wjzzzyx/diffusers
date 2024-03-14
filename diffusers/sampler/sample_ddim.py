@@ -56,8 +56,8 @@ class DDIMSampler():
     def sample(
         self,
         model,
-        batch_size: int,
-        image_shape: Sequence,
+        batch_size: int = None,
+        image_shape: Sequence = None,
         image: torch.Tensor = None,
         cond_pos_prompt: torch.Tensor = None,
         cond_neg_prompt: torch.Tensor = None,
@@ -86,7 +86,7 @@ class DDIMSampler():
                 epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
             elif model.prediction_type == 'v_prediction':
                 raise NotImplementedError('v_prediction is not implemented for DDPM.')
-            image = self.step({'sample': sample, 'epsilon': epsilon}, t, image, generator=generator)
+            image = self.step({'sample': sample, 'epsilon': epsilon}, t, generator=generator)
         return image
 
 
@@ -104,22 +104,13 @@ class DDIMInverseSampler():
         self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
         self.alphas = 1 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+
+        self.set_timesteps(num_inference_steps)
     
     def set_timesteps(self, num_inference_steps):
         self.num_inference_steps = num_inference_steps
         # leading spacing
         self.timesteps = range(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
-    
-    def step(self, output, t_next: int):
-        alpha_cumprod_t_next = self.alphas_cumprod[t_next]
-
-        pred_x0 = output['sample']
-        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
-        pred_z = output['epsilon']
-
-        sample_next = torch.sqrt(alpha_cumprod_t_next) * pred_x0 + torch.sqrt(1 - alpha_cumprod_t_next) * pred_z
-
-        return sample_next
     
     def sample(
         self,
@@ -133,13 +124,13 @@ class DDIMInverseSampler():
             alpha_cumprod_t = self.alphas_cumprod[t]
             alpha_cumprod_t_prev = self.alphas_cumprod[t_prev] if t_prev >= 0 else torch.tensor(1.0, device=model.device)
 
-            output = model(image, t_prev)
+            output = model(xt, t_prev)
             if model.prediction_type == 'epsilon':
                 epsilon = output
-                sample = (image - torch.sqrt(1 - alpha_cumprod_t_prev) * output) / torch.sqrt(alpha_cumprod_t_prev)
+                sample = (xt - torch.sqrt(1 - alpha_cumprod_t_prev) * output) / torch.sqrt(alpha_cumprod_t_prev)
             elif model.prediction_type == 'sample':
                 sample = output
-                epsilon = (image - torch.sqrt(alpha_cumprod_t_prev) * output) / torch.sqrt(1 - alpha_cumprod_t_prev)
+                epsilon = (xt - torch.sqrt(alpha_cumprod_t_prev) * output) / torch.sqrt(1 - alpha_cumprod_t_prev)
             elif model.prediction_type == 'v_prediction':
                 raise NotImplementedError('v_prediction is not implemented for DDPM.')
             
