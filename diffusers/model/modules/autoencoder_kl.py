@@ -25,7 +25,7 @@ from .attention_processor import (
     AttnAddedKVProcessor,
     AttnProcessor,
 )
-from .vae import Decoder, DecoderOutput, DiagonalGaussianDistribution, Encoder
+from .vae import Decoder, DiagonalGaussianDistribution, Encoder
 
 
 class AutoencoderKL(nn.Module):
@@ -257,21 +257,18 @@ class AutoencoderKL(nn.Module):
 
         return posterior
 
-    def _decode(self, z: torch.FloatTensor, return_dict: bool = True) -> Union[DecoderOutput, torch.FloatTensor]:
+    def _decode(self, z: torch.FloatTensor, return_dict: bool = True) -> torch.FloatTensor:
         if self.use_tiling and (z.shape[-1] > self.tile_latent_min_size or z.shape[-2] > self.tile_latent_min_size):
             return self.tiled_decode(z, return_dict=return_dict)
 
         z = self.post_quant_conv(z)
         dec = self.decoder(z)
 
-        if not return_dict:
-            return (dec,)
-
-        return DecoderOutput(sample=dec)
+        return dec
 
     def decode(
         self, z: torch.FloatTensor, return_dict: bool = True, generator=None
-    ) -> Union[DecoderOutput, torch.FloatTensor]:
+    ) -> torch.FloatTensor:
         """
         Decode a batch of images.
 
@@ -287,15 +284,12 @@ class AutoencoderKL(nn.Module):
 
         """
         if self.use_slicing and z.shape[0] > 1:
-            decoded_slices = [self._decode(z_slice).sample for z_slice in z.split(1)]
+            decoded_slices = [self._decode(z_slice) for z_slice in z.split(1)]
             decoded = torch.cat(decoded_slices)
         else:
-            decoded = self._decode(z).sample
+            decoded = self._decode(z)
 
-        if not return_dict:
-            return (decoded,)
-
-        return DecoderOutput(sample=decoded)
+        return decoded
 
     def blend_v(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
         blend_extent = min(a.shape[2], b.shape[2], blend_extent)
@@ -360,7 +354,7 @@ class AutoencoderKL(nn.Module):
 
         return posterior
 
-    def tiled_decode(self, z: torch.FloatTensor, return_dict: bool = True) -> Union[DecoderOutput, torch.FloatTensor]:
+    def tiled_decode(self, z: torch.FloatTensor, return_dict: bool = True) -> torch.FloatTensor:
         r"""
         Decode a batch of images using a tiled decoder.
 
@@ -403,10 +397,8 @@ class AutoencoderKL(nn.Module):
             result_rows.append(torch.cat(result_row, dim=3))
 
         dec = torch.cat(result_rows, dim=2)
-        if not return_dict:
-            return (dec,)
-
-        return DecoderOutput(sample=dec)
+        
+        return dec
 
     def forward(
         self,
@@ -414,7 +406,7 @@ class AutoencoderKL(nn.Module):
         sample_posterior: bool = False,
         return_dict: bool = True,
         generator: Optional[torch.Generator] = None,
-    ) -> Union[DecoderOutput, torch.FloatTensor]:
+    ) -> torch.FloatTensor:
         r"""
         Args:
             sample (`torch.FloatTensor`): Input sample.
@@ -431,10 +423,7 @@ class AutoencoderKL(nn.Module):
             z = posterior.mode()
         dec = self.decode(z).sample
 
-        if not return_dict:
-            return (dec,)
-
-        return DecoderOutput(sample=dec)
+        return dec
 
     # Copied from diffusers.models.unet_2d_condition.UNet2DConditionModel.fuse_qkv_projections
     def fuse_qkv_projections(self):
