@@ -71,10 +71,20 @@ class DDPMSampler():
 
         return sample_next
     
-    def sample(self, model, batch_size: int, image_shape: Sequence, generator=None):
+    def sample(
+        self,
+        model,
+        batch_size: int,
+        image_shape: Sequence,
+        cond_pos_prompt: torch.Tensor = None,
+        cond_neg_prompt: torch.Tensor = None,
+        generator=None
+    ):
+        denoiser = self.get_denoiser(model)
         image = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
+
         for t in self.timesteps:
-            output = model(image, t)
+            output = denoiser(image, t, cond_pos_prompt, cond_neg_prompt)
             if model.prediction_type == 'epsilon':
                 epsilon = output
                 sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
