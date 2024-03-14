@@ -4,7 +4,7 @@ from typing import Any, Dict
 def replace_substring_in_state_dict_if_present(
     state_dict: Dict[str, Any], substring: str, replace: str
 ):
-    keys = sorted(state_dict.kyes())
+    keys = sorted(state_dict.keys())
     for key in keys:
         if substring in key:
             newkey = key.replace(substring, replace)
