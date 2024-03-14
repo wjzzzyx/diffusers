@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Any
+from typing import Optional, Any, List
 
 from diffusers.model.discriminator import NLayerDiscriminator
 from diffusers.loss.lpips import LPIPS
@@ -315,9 +315,8 @@ def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
 
 class Encoder(nn.Module):
     def __init__(
-        self, *,
-        in_channels, ch, z_channels, ch_mult=(1,2,4,8), num_res_blocks,
-        attn_resolutions, resolution, dropout=0.0, resamp_with_conv=True,
+        self, in_channels: int, ch: int, z_channels: int, ch_mult: List[int], num_res_blocks: int,
+        attn_resolutions: List[int], resolution: int, dropout=0.0, resamp_with_conv=True,
         double_z=False, attn_type="vanilla"
     ):
         """
@@ -425,9 +424,8 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-        self, *,
-        ch, out_ch, z_channels, ch_mult=(1,2,4,8), num_res_blocks,
-        attn_resolutions, resolution, dropout=0.0, resamp_with_conv=True,
+        self, ch: int, out_ch: int, z_channels: int, ch_mult: List[int], num_res_blocks: int,
+        attn_resolutions: List[int], resolution, dropout=0.0, resamp_with_conv=True,
         give_pre_end=False, tanh_out=False, attn_type="vanilla"
     ):
         """
