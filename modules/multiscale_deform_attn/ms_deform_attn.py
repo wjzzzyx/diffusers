@@ -43,8 +43,8 @@ class MSDeformAttn(nn.Module):
     def __init__(
         self,
         embed_dim: int = 256,
-        num_heads: int = 8,
         num_levels: int = 4,
+        num_heads: int = 8,
         num_points: int = 4,
         img2col_step: int = 64,
     ):
