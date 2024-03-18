@@ -3,7 +3,6 @@ from typing import Callable, Sequence
 
 from diffusers import k_diffusion
 from diffusers.sampler import schedule
-from diffusers.sampler.denoiser import CFGDenoiser
 
 
 class DPMSampler():
@@ -22,7 +21,6 @@ class DPMSampler():
         beta_schedule: str,
         initial_noise_multiplier: float = 1.0,
         denoising_strength: float = 1.0,
-        cfg_scale: float = 1.0,
     ):
         """
         Args:
@@ -42,7 +40,6 @@ class DPMSampler():
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.initial_noise_multiplier = initial_noise_multiplier
         self.denoising_strength = denoising_strength
-        self.cfg_scale = cfg_scale
 
     def get_sigmas(self, denoiser):
         steps = self.num_inference_steps + 1 if self.discard_next_to_last_sigma else self.num_inference_steps
@@ -61,81 +58,62 @@ class DPMSampler():
         
         return sigmas
     
-    def get_denoiser(self, model):
-        if model.prediction_type == 'epsilon':
-            denoiser = k_diffusion.external.DiscreteEpsDDPMDenoiser(model, self.alphas_cumprod, quantize=False)
-        elif model.prediction_type == 'v_prediction':
-            denoiser = k_diffusion.external.DiscreteVDDPMDenoiser(model, self.alphas_cumprod, quantize=False)
-        else:
-            raise NotImplementedError()
-        if self.cfg_scale > 1:
-            denoiser = CFGDenoiser(denoiser, self.cfg_scale)
-        return denoiser
-    
     def set_timesteps(self, num_inference_steps: int):
         self.num_inference_steps = num_inference_steps
     
     def sample(
         self,
-        model,
+        denoiser,
         batch_size: int,
         image_shape: Sequence,
-        cond_pos_prompt: torch.Tensor = None,
-        cond_neg_prompt: torch.Tensor = None,
+        denoiser_args: dict,
         generator = None
     ) -> torch.Tensor:
-        denoiser = self.get_denoiser(model).to(model.device)
-        sigmas = self.get_sigmas(denoiser).to(model.device)
+        sigmas = self.get_sigmas(denoiser).to(denoiser.inner_model.device)
 
-        noise = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
+        noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
         xi = noise * sigmas[0]
-
-        extra_args = dict()
-        if cond_pos_prompt is not None:
-            extra_args['cond_pos_prompt'] = cond_pos_prompt
-        if cond_neg_prompt is not None:
-            extra_args['cond_neg_prompt'] = cond_neg_prompt
 
         if self.sampler == 'dpmpp_2m':
             sample = k_diffusion.sampling.sample_dpmpp_2m(
-                denoiser, xi, sigmas=sigmas, extra_args=extra_args
+                denoiser, xi, sigmas=sigmas, extra_args=denoiser_args
             )
         elif self.sampler == 'dpmpp_sde':
             sample = k_diffusion.sampling.sample_dpmpp_sde(
-                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=extra_args
+                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=denoiser_args
             )
         elif self.sampler == 'dpmpp_2m_sde':
             sample = k_diffusion.sampling.sample_dpmpp_2m_sde(
                 denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., solver_type=self.solver_type,
-                extra_args=extra_args
+                extra_args=denoiser_args
             )
         elif self.sampler == 'dpmpp_2s_ancestral':
             sample = k_diffusion.sampling.sample_dpmpp_2s_ancestral(
-                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=extra_args
+                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=denoiser_args
             )
         elif self.sampler == 'dpmpp_3m_sde':
             sample = k_diffusion.sampling.sample_dpmpp_3m_sde(
-                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=extra_args
+                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=denoiser_args
             )
         elif self.sampler == 'dpm_2':
             sample = k_diffusion.sampling.sample_dpm_2(
                 denoiser, xi, sigmas=sigmas, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.,
-                extra_args=extra_args
+                extra_args=denoiser_args
             )
         elif self.sampler == 'dpm_2_ancestral':
             sample = k_diffusion.sampling.sample_dpm_2_ancestral(
-                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=extra_args
+                denoiser, xi, sigmas=sigmas, eta=1., s_noise=1., extra_args=denoiser_args
             )
         elif self.sampler == 'dpm_fast':
             # is eta correct?
             sample = k_diffusion.sampling.sample_dpm_fast(
                 denoiser, xi, sigma_min=denoiser.sigmas[0].item(), sigma_max=denoiser.sigmas[-1].item(), n=self.num_inference_steps,
-                eta=1., s_noise=1., extra_args=extra_args
+                eta=1., s_noise=1., extra_args=denoiser_args
             )
         elif self.sampler == 'dpm_adaptive':
             # is eta correct?
             sample = k_diffusion.sampling.sample_dpm_adaptive(
-                denoiser, xi, sigma_min=denoiser.sigmas[0].item(), sigma_max=denoiser.sigmas[-1].item(), eta=1., extra_args=extra_args
+                denoiser, xi, sigma_min=denoiser.sigmas[0].item(), sigma_max=denoiser.sigmas[-1].item(), eta=1., extra_args=denoiser_args
             )
         
         return sample

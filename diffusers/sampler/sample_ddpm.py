@@ -3,7 +3,6 @@ import torch
 from typing import Dict, Sequence
 
 from . import schedule
-from diffusers.sampler.denoiser import DiscreteTimestepsDenoiser, DiscreteTimestepsVDenoiser, CFGDenoiser
 
 
 class DDPMSampler():
@@ -28,19 +27,8 @@ class DDPMSampler():
         # leading spaceing
         self.timesteps = range(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
         self.timesteps = self.timesteps[::-1]
-    
-    def get_denoiser(self, model):
-        if model.prediction_type == 'epsilon':
-            denoiser = DiscreteTimestepsDenoiser(model, self.alphas_cumprod)
-        elif model.prediction_type  == 'v_prediction':
-            denoiser = DiscreteTimestepsVDenoiser(model, self.alphas_cumprod)
-        else:
-            raise NotImplementedError()
-        if self.cfg_scale > 1:
-            denoiser = CFGDenoiser(denoiser, self.cfg_scale)
-        return denoiser
 
-    def step(self, output: Dict[str, torch.Tensor], t: int, sample: torch.Tensor, generator = None):
+    def step(self, denoised: torch.Tensor, t: int, sample: torch.Tensor, generator = None):
         """
         Args:
             output: model output for the current denoising step
@@ -52,7 +40,7 @@ class DDPMSampler():
         alpha_cumprod_t_next = self.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(1.0, device=sample.device)
         alpha_t = alpha_cumprod_t / alpha_cumprod_t_next
         
-        pred_x0 = output['sample']
+        pred_x0 = denoised
         # pred_x0 = dynamic_threshold(pred_x0)
         pred_x0 = torch.clamp(pred_x0, -1., 1.)
 
@@ -71,29 +59,33 @@ class DDPMSampler():
 
         return sample_next
     
+    @torch.no_grad()
     def sample(
         self,
-        model,
+        denoiser,
         batch_size: int,
         image_shape: Sequence,
-        cond_pos_prompt: torch.Tensor = None,
-        cond_neg_prompt: torch.Tensor = None,
+        denoiser_args: dict,
         generator=None
     ):
-        denoiser = self.get_denoiser(model)
-        image = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
+        """
+        Args:
+            denoiser: takes charge of one step denoising, return denoised image
+        """
+        image = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
 
         for t in self.timesteps:
-            output = denoiser(image, t, cond_pos_prompt, cond_neg_prompt)
-            if model.prediction_type == 'epsilon':
-                epsilon = output
-                sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
-            elif model.prediction_type == 'sample':
-                sample = output
-                epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
-            elif model.prediction_type == 'v_prediction':
-                raise NotImplementedError('v_prediction is not implemented for DDPM.')
-            image = self.step({'sample': sample, 'epsilon': epsilon}, t, image, generator=generator)
+            time_t = torch.full((batch_size,), t, dtype=torch.int64, device=image.device)
+            denoised = denoiser(image, time_t, **denoiser_args)
+            # if model.prediction_type == 'epsilon':
+            #     epsilon = output
+            #     sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
+            # elif model.prediction_type == 'sample':
+            #     sample = output
+            #     epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
+            # elif model.prediction_type == 'v_prediction':
+            #     raise NotImplementedError('v_prediction is not implemented for DDPM.')
+            image = self.step(denoised, t, image, generator=generator)
         return image
 
 

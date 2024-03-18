@@ -61,7 +61,7 @@ model:
         num_inference_steps: 20
         beta_start: 0.00085
         beta_end: 0.012
-        beta_schedule: scaled_linear
+        beta_schedule: sqrt_linear
         # set_alpha_to_one: false
         # skip_prk_steps: true
         # steps_offset: 1
