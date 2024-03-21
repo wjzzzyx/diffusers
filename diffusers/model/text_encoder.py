@@ -24,8 +24,9 @@ class CLIPEncoderUnlimited(nn.Module):
             assert layer_idx is not None
             assert 0 <= abs(layer_idx) <= 12
         
-        self.comma_token_id = self.tokenizer.vocab.get(',</w>', None)
-        self.stop_token_id = self.tokenizer.vocab.get('.</w>', None)
+        vocab = self.tokenizer.get_vocab()
+        self.comma_token_id = vocab.get(',</w>', None)
+        self.stop_token_id = vocab.get('.</w>', None)
     
     @property
     def device(self):
@@ -34,14 +35,14 @@ class CLIPEncoderUnlimited(nn.Module):
     def forward(self, texts):
         tokens = self.get_tokens(texts)
         chunks = self.split_chunks(tokens)    # list(batch) of list(chunk)
-        chunks_input = [x for x in zip(chunks)]    # list(chunk) of list(batch)
+        chunks_input = list(map(list, zip(*chunks)))    # list(chunk) of list(batch)
 
         text_embs = list()
         for chunk in chunks_input:
             emb = self.encode_with_transformers(chunk)
             text_embs.append(emb)
         
-        return torch.stack(text_embs, dim=1)
+        return torch.concatenate(text_embs, dim=1)
 
     def get_tokens(self, texts):
         return self.tokenizer(texts, truncation=False, add_special_tokens=False).input_ids
@@ -50,6 +51,12 @@ class CLIPEncoderUnlimited(nn.Module):
         batch_chunks = list()
         for tokens in batch_tokens:
             batch_chunks.append(self._split_chunks(tokens))
+        
+        max_num_chunks = max([len(chunks) for chunks in batch_chunks])
+        empty_chunk = [self.tokenizer.bos_token_id] + [self.tokenizer.eos_token_id] * (self.tokenizer.model_max_length - 1)
+        for chunks in batch_chunks:
+            if len(chunks) < max_num_chunks:
+                chunks.append(empty_chunk)
         return batch_chunks
 
     def _split_chunks(self, tokens):
@@ -64,22 +71,26 @@ class CLIPEncoderUnlimited(nn.Module):
                 i += 1
             elif tokens[i] == self.comma_token_id:
                 last_comma = i
+                pos += 1
                 i += 1
             elif pos == self.tokenizer.model_max_length - 2:
                 split_points.append(last_comma)
                 pos = 0
                 i = last_comma + 1
+            else:
+                pos += 1
+                i += 1
         
         chunks = list()
         for j in range(len(split_points)):
             p = split_points[j]
             if j == 0:
-                chunks.append(tokens[0:p])
+                chunks.append(tokens[0:p+1])
             else:
                 last_p = split_points[j-1]
-                chunks.append(tokens[last_p + 1:p])
-                if j == len(split_points) - 1:
-                    chunks.append(tokens[p:])
+                chunks.append(tokens[last_p+1:p+1])
+            if j == len(split_points) - 1:
+                chunks.append(tokens[p+1:])
         chunks = [chunk for chunk in chunks if chunk != []]
 
         for ichunk in range(len(chunks)):
