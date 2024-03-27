@@ -151,8 +151,8 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
                 m_text = m_text.strip()
                 m_weight = float(m_weight.strip())
                 text_with_weights.append((text[last:m.start()], 1.0))
-                text_with_weights.append((text[m_text], m_weight))
-                last = m.end() + 1
+                text_with_weights.append((m_text, m_weight))
+                last = m.end()
             text_with_weights.append((text[last:], 1.0))
 
             texts_with_weights.append(text_with_weights)
@@ -184,7 +184,7 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
         
         max_num_chunks = max([len(chunks) for chunks in batch_chunks])
         empty_chunk = [self.tokenizer.bos_token_id] + [self.tokenizer.eos_token_id] * (self.tokenizer.model_max_length - 1)
-        empty_chunk_weight = [0.0] * self.tokenizer.model_max_length
+        empty_chunk_weight = [1.0] * self.tokenizer.model_max_length
         for chunks, chunk_weights in zip(batch_chunks, batch_chunk_weights):
             while len(chunks) < max_num_chunks:
                 chunks.append(empty_chunk)
@@ -193,7 +193,7 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
         return batch_chunks, batch_chunk_weights
 
     def _split_chunks(self, tokens, weights):
-        split_points = self.locate_split_points(tokens)
+        split_points = self._locate_split_points(tokens)
         chunks = list()
         chunk_weights = list()
         last = 0
@@ -205,15 +205,18 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
         chunks.append(tokens[last:])
         chunk_weights.append(weights[last:])
 
+        chunks = [chunk for chunk in chunks if chunk != []]
+        chunk_weights = [w for w in chunk_weights if w != []]
+
         # pad each chunk to be model_max_length
         for ichunk in range(len(chunks)):
             while len(chunks[ichunk]) < self.tokenizer.model_max_length - 2:
                 chunks[ichunk].append(self.tokenizer.eos_token_id)
-                chunk_weights[ichunk].append(0.0)
+                chunk_weights[ichunk].append(1.0)
         
         # add bos and eos tokens to each chunk
         for ichunk in range(len(chunks)):
             chunks[ichunk] = [self.tokenizer.bos_token_id] + chunks[ichunk] + [self.tokenizer.eos_token_id]
-            chunk_weights[ichunk] = [0.0] + chunk_weights[ichunk] + [0.0]
+            chunk_weights[ichunk] = [1.0] + chunk_weights[ichunk] + [1.0]
         
         return chunks, chunk_weights
