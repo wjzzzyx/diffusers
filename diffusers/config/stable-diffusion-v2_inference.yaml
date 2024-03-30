@@ -1,0 +1,58 @@
+# model was trained on 512x512 images
+model:
+  base_learning_rate: 1.0e-4
+  target: diffusers.model.stable_diffusion_stabilityai.StableDiffusionStabilitiAI
+  params:
+    model_config:
+      scale_factor: 0.18215
+      prediction_type: epsilon
+
+      unet_config:
+        target: diffusers.model.stable_diffusion_stabilityai.UNetModel
+        params:
+          image_size: 32 # unused
+          in_channels: 4
+          out_channels: 4
+          model_channels: 320
+          attention_resolutions: [4, 2, 1]
+          num_res_blocks: 2
+          channel_mult: [1, 2, 4, 4]
+          num_head_channels: 64
+          use_spatial_transformer: True
+          use_linear_in_transformer: True    # linear projection layer
+          transformer_depth: 1
+          context_dim: 1024
+          legacy: False
+      
+      first_stage_config:
+        target: diffusers.model.vae.AutoEncoderKL
+        params:
+          in_channels: 3
+          base_channels: 128
+          out_channels: 3
+          z_channels: 4
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+      
+      cond_stage_config:
+        target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+        params:
+          freeze: True
+          layer: 'penultimate'
+
+sampler:
+  target: diffusers.sampler.sample_dpm.DPMSampler
+  params:
+    sampler: dpmpp_2m
+    scheduler: karras
+    solver_type: none
+    discard_next_to_last_sigma: False
+    second_order: False
+    uses_ensd: False
+    num_train_steps: 1000
+    num_inference_steps: 20
+    beta_start: 0.00085
+    beta_end: 0.012
+    beta_schedule: sqrt_linear
