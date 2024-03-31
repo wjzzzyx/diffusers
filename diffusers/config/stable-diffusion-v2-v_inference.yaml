@@ -1,6 +1,7 @@
+# trained on 768x768 images
 model:
   base_learning_rate: 1.0e-4
-  target: diffusers.model.stable_diffusion_stabilityai.StableDiffusionStabilitiAI
+  target: diffusers.model.stable_diffusion_stabilityai.StableDiffusion_StabilityAI
   params:
     model_config:
       scale_factor: 0.18215

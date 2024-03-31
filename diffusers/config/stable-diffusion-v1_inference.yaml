@@ -37,3 +37,18 @@ model:
       
       cond_stage_config:
         target: diffusers.model.text_encoder.CLIPEncoderWeighted
+
+sampler:
+  target: diffusers.sampler.sample_dpm.DPMSampler
+  params:
+    sampler: dpmpp_2m
+    scheduler: karras
+    solver_type: none
+    discard_next_to_last_sigma: False
+    second_order: False
+    uses_ensd: False
+    num_train_steps: 1000
+    num_inference_steps: 20
+    beta_start: 0.00085
+    beta_end: 0.012
+    beta_schedule: sqrt_linear

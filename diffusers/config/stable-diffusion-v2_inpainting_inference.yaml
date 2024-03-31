@@ -1,26 +1,26 @@
 model:
-  base_learning_rate: 7.5e-05
+  base_learning_rate: 5.0e-05
   target: diffusers.model.stable_diffusion_stabilityai.StableDiffusion_CondImaging
   params:
     model_config:
       scale_factor: 0.18215
-      prediction_type: 'epsilon'
+      prediction_type: epsilon
 
       unet_config:
         target: diffusers.model.stable_diffusion_stabilityai.UNetModel
         params:
           image_size: 32 # unused
-          in_channels: 9  # 4 data + 4 downscaled image + 1 mask
+          in_channels: 9
           out_channels: 4
           model_channels: 320
           attention_resolutions: [4, 2, 1]
           num_res_blocks: 2
           channel_mult: [1, 2, 4, 4]
-          num_heads: 8
+          num_head_channels: 64
           use_spatial_transformer: True
+          use_linear_in_transformer: True    # linear projection layer
           transformer_depth: 1
-          context_dim: 768
-          use_checkpoint: True
+          context_dim: 1024
           legacy: False
       
       first_stage_config:
@@ -36,4 +36,7 @@ model:
           dropout: 0.0
       
       cond_stage_config:
-        target: diffusers.model.ldm.modules.encoders.modules.FrozenCLIPEmbedder
+        target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+        params:
+          freeze: True
+          layer: 'penultimate'
