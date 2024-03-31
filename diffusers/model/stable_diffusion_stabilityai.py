@@ -1096,3 +1096,10 @@ class StableDiffusion_CondImaging(StableDiffusion_StabilityAI):
         xt = torch.cat((xt, cond_imaging), dim=1)
         output = self.diffusion_model(xt, t, context=cond_prompt)
         return output
+
+
+class StableDiffusion_CondImagingEmb(StableDiffusion_StabilityAI):
+    def forward_diffusion_model(self, xt, t, cond_prompt, cond_imaging, cond_emb):
+        xt = torch.cat((xt, cond_imaging), dim=1)
+        output = self.diffusion_model(xt, t, context=cond_prompt, y=cond_emb)
+        return output
