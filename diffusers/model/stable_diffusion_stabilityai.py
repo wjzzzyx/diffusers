@@ -1091,7 +1091,7 @@ class StableDiffusion_StabilityAI(nn.Module):
         return self.first_stage_model.decode(z)
 
 
-class StableDiffusionImagingCondition_StabilityAI(StableDiffusion_StabilityAI):
+class StableDiffusion_CondImaging(StableDiffusion_StabilityAI):
     def forward_diffusion_model(self, xt, t, cond_prompt, cond_imaging):
         xt = torch.cat((xt, cond_imaging), dim=1)
         output = self.diffusion_model(xt, t, context=cond_prompt)
