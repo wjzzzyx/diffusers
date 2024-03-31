@@ -14,8 +14,9 @@ import utils
 # load model
 config = OmegaConf.load('infant/diffusers/config/stable-diffusion-v2_upscale_inference.yaml')
 sd_model = utils.instantiate_from_config(config.model)
-checkpoint = safetensors.torch.load_file('infant/diffusers/pretrained/', device='cpu')
-state_dict = checkpoint
+# checkpoint = safetensors.torch.load_file('infant/diffusers/pretrained/sd-v2-x4-upscaler-ema.ckpt', device='cpu')
+checkpoint = torch.load('infant/diffusers/pretrained/sd-v2-x4-upscaler-ema.ckpt', map_location='cpu')
+state_dict = checkpoint['state_dict']
 replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
 missing, unexpected = sd_model.load_state_dict(state_dict, strict=False)
 sd_model.eval()
@@ -38,11 +39,11 @@ cond_neg_prompt = ['']
 cond_pos_prompt = sd_model.get_learned_conditioning(cond_pos_prompt)
 cond_neg_prompt = sd_model.get_learned_conditioning(cond_neg_prompt)
 
-lowres_image = Image.open()
-lowres_image = TF.pil_to_image(lowres_image)
-lowres_image = lowres_image.permute(2, 0, 1).unsqueeze(0).cuda()
+lowres_image = Image.open().convert('RGB')
+lowres_image = TF.pil_to_tensor(lowres_image)
+lowres_image = lowres_image.unsqueeze(0).cuda()
 noise_level = torch.tensor([20]).cuda()
-noise = torch.randn_like(lowres_image)
+noise = torch.randn(lowres_image.size()).cuda()
 lowres_aug = sqrt_alphas_cumprod[noise_level] * lowres_image + sqrt_one_minus_alphas_cumprod[noise_level] * noise
 
 denoiser_args = {
@@ -51,7 +52,7 @@ denoiser_args = {
     'cond_imaging': lowres_aug,
     'cond_emb': noise_level
 }
-samples = sampler.sample(denoiser, batch_size=1, image_shape=(4, 64, 64), denoiser_args=denoiser_args)
+samples = sampler.sample(denoiser, batch_size=1, image_shape=(4, 200, 200), denoiser_args=denoiser_args)
 
 samples = sd_model.decode_first_stage(samples)
 samples = torch.clamp((samples + 1) / 2, min=0, max=1)
