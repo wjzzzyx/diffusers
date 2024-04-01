@@ -1,37 +1,17 @@
+import open_clip
 import re
 import torch
 import torch.nn as nn
 from transformers import CLIPTokenizer, CLIPTextModel
 
 
-class CLIPEncoderUnlimited(nn.Module):
-    """Uses the CLIP transformer encoder for text (from huggingface)"""
+class TextEncoderUnlimited(nn.Module):
+    "A base class for unlimited text encoder. Need to inherit and specify tokenizer and model."
     LAYERS = [
         "last",
         "pooled",
         "hidden"
     ]
-
-    def __init__(self, version="openai/clip-vit-large-patch14", max_length=77,
-                 layer="last", layer_idx=None):  # clip-vit-base-patch32
-        super().__init__()
-        assert layer in self.LAYERS
-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
-        self.transformer = CLIPTextModel.from_pretrained(version)
-        self.max_length = max_length
-        self.layer = layer
-        self.layer_idx = layer_idx
-        if layer == "hidden":
-            assert layer_idx is not None
-            assert 0 <= abs(layer_idx) <= 12
-        
-        vocab = self.tokenizer.get_vocab()
-        self.comma_token_id = vocab.get(',</w>', None)
-        self.stop_token_id = vocab.get('.</w>', None)
-    
-    @property
-    def device(self):
-        return self.transformer.text_model.embeddings.token_embedding.weight.device
     
     def forward(self, texts):
         tokens = self.get_tokens(texts)
@@ -40,7 +20,7 @@ class CLIPEncoderUnlimited(nn.Module):
 
         text_embs = list()
         for chunk in chunks_input:
-            emb = self.encode_with_transformers(chunk)
+            emb = self.encode_batch_tokens(chunk)
             text_embs.append(emb)
         
         return torch.concatenate(text_embs, dim=1)
@@ -54,7 +34,7 @@ class CLIPEncoderUnlimited(nn.Module):
             batch_chunks.append(self._split_chunks(tokens))
         
         max_num_chunks = max([len(chunks) for chunks in batch_chunks])
-        empty_chunk = [self.tokenizer.bos_token_id] + [self.tokenizer.eos_token_id] * (self.tokenizer.model_max_length - 1)
+        empty_chunk = [self.bos_token_id] + [self.eos_token_id] * (self.model_max_length - 1)
         for chunks in batch_chunks:
             while len(chunks) < max_num_chunks:
                 chunks.append(empty_chunk)
@@ -75,11 +55,11 @@ class CLIPEncoderUnlimited(nn.Module):
         chunks = [chunk for chunk in chunks if chunk != []]
 
         for ichunk in range(len(chunks)):
-            while len(chunks[ichunk]) < self.tokenizer.model_max_length - 2:
-                chunks[ichunk].append(self.tokenizer.eos_token_id)
+            while len(chunks[ichunk]) < self.model_max_length - 2:
+                chunks[ichunk].append(self.eos_token_id)
         
         for ichunk in range(len(chunks)):
-            chunks[ichunk] = [self.tokenizer.bos_token_id] + chunks[ichunk] + [self.tokenizer.eos_token_id]
+            chunks[ichunk] = [self.bos_token_id] + chunks[ichunk] + [self.eos_token_id]
         
         return chunks
     
@@ -97,7 +77,7 @@ class CLIPEncoderUnlimited(nn.Module):
                 last_comma = i
                 pos += 1
                 i += 1
-            elif pos == self.tokenizer.model_max_length - 2:
+            elif pos == self.model_max_length - 2:
                 split_points.append(last_comma)
                 pos = 0
                 i = last_comma + 1
@@ -106,18 +86,11 @@ class CLIPEncoderUnlimited(nn.Module):
                 i += 1
         return split_points
 
-    def encode_with_transformers(self, batch_tokens):
-        batch_tokens = torch.asarray(batch_tokens, device=self.device)
-        outputs = self.transformer(input_ids=batch_tokens, output_hidden_states=(self.layer == 'hidden'))
-        if self.layer == 'hidden':
-            h = outputs.hidden_states[self.layer_idx]
-            h = self.transformer.text_model.final_layer_norm(h)
-        else:
-            h = outputs.last_hidden_state
-        return h
+    def encode_batch_tokens(self, batch_tokens):
+        raise NotImplementedError()
 
 
-class CLIPEncoderWeighted(CLIPEncoderUnlimited):
+class TextEncoderWeighted(TextEncoderUnlimited):
     def forward(self, texts):
         texts_with_weights = self.parse_weighted_text(texts)
         tokens, weights = self.get_tokens(texts_with_weights)
@@ -126,7 +99,7 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
 
         text_embs = list()
         for chunk in chunks_input:
-            emb = self.encode_with_transformers(chunk)
+            emb = self.encode_batch_tokens(chunk)
             text_embs.append(emb)
         text_embs = torch.concatenate(text_embs, dim=1)    # shape (batch, seq, emb)
         
@@ -183,8 +156,8 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
             batch_chunk_weights.append(chunk_weights)
         
         max_num_chunks = max([len(chunks) for chunks in batch_chunks])
-        empty_chunk = [self.tokenizer.bos_token_id] + [self.tokenizer.eos_token_id] * (self.tokenizer.model_max_length - 1)
-        empty_chunk_weight = [1.0] * self.tokenizer.model_max_length
+        empty_chunk = [self.bos_token_id] + [self.eos_token_id] * (self.model_max_length - 1)
+        empty_chunk_weight = [1.0] * self.model_max_length
         for chunks, chunk_weights in zip(batch_chunks, batch_chunk_weights):
             while len(chunks) < max_num_chunks:
                 chunks.append(empty_chunk)
@@ -210,13 +183,83 @@ class CLIPEncoderWeighted(CLIPEncoderUnlimited):
 
         # pad each chunk to be model_max_length
         for ichunk in range(len(chunks)):
-            while len(chunks[ichunk]) < self.tokenizer.model_max_length - 2:
-                chunks[ichunk].append(self.tokenizer.eos_token_id)
+            while len(chunks[ichunk]) < self.model_max_length - 2:
+                chunks[ichunk].append(self.eos_token_id)
                 chunk_weights[ichunk].append(1.0)
         
         # add bos and eos tokens to each chunk
         for ichunk in range(len(chunks)):
-            chunks[ichunk] = [self.tokenizer.bos_token_id] + chunks[ichunk] + [self.tokenizer.eos_token_id]
+            chunks[ichunk] = [self.bos_token_id] + chunks[ichunk] + [self.eos_token_id]
             chunk_weights[ichunk] = [1.0] + chunk_weights[ichunk] + [1.0]
         
         return chunks, chunk_weights
+
+
+class CLIPTextEncoder(TextEncoderWeighted):
+    """Uses the CLIP transformer encoder for text (from huggingface)"""
+
+    def __init__(self, version="openai/clip-vit-large-patch14", layer="last", layer_idx=None):
+        super().__init__()
+        assert layer in self.LAYERS
+        self.tokenizer = CLIPTokenizer.from_pretrained(version)
+        self.transformer = CLIPTextModel.from_pretrained(version)
+        self.layer = layer
+        self.layer_idx = layer_idx
+        if layer == "hidden":
+            assert layer_idx is not None
+            assert 0 <= abs(layer_idx) <= 12
+        
+        vocab = self.tokenizer.get_vocab()
+        self.bos_token_id = self.tokenizer.bos_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id
+        self.model_max_length = self.tokenizer.model_max_length
+        self.comma_token_id = vocab.get(',</w>', None)
+        self.stop_token_id = vocab.get('.</w>', None)
+    
+    @property
+    def device(self):
+        return self.transformer.text_model.embeddings.token_embedding.weight.device
+    
+    def encode_batch_tokens(self, batch_tokens):
+        batch_tokens = torch.asarray(batch_tokens, device=self.device)
+        outputs = self.transformer(input_ids=batch_tokens, output_hidden_states=(self.layer == 'hidden'))
+        if self.layer == 'hidden':
+            h = outputs.hidden_states[self.layer_idx]
+            h = self.transformer.text_model.final_layer_norm(h)
+        else:
+            h = outputs.last_hidden_state
+        return h
+
+
+class OpenCLIPTextEncoder(TextEncoderWeighted):
+    def __init__(self, arch, version, layer='last', layer_idx=-1):
+        super().__init__()
+        assert layer in self.LAYERS
+        self.tokenizer = open_clip.get_tokenizer(arch)
+        self.model = open_clip.create_model(arch, pretrained=version)
+        del self.model.visual
+        self.layer = layer
+        self.layer_idx = layer_idx if layer_idx >= 0 else self.model.transformer.layers + layer_idx
+    
+        self.bos_token_id = self.tokenizer.sot_token_id
+        self.eos_token_id = self.tokenizer.eot_token_id
+        self.model_max_length = self.tokenizer.context_length
+        self.comma_token_id = self.encoder[',</w>']
+        self.stop_token_id = self.encoder['.</w>']
+    
+    @property
+    def device(self):
+        return self.model.transformer.token_embedding.weight.device
+    
+    def encode_batch_tokens(self, batch_tokens):
+        batch_tokens = torch.asarray(batch_tokens, device=self.device)
+        x = self.model.token_embedding(batch_tokens)
+        x = x + self.model.positional_embedding
+        x = x.permute(1, 0, 2)    # shape (seq, batch, emb)
+        for i_block, block in enumerate(self.model.transformer.resblocks):
+            x = block(x, attn_mask=self.model.attn_mask)
+            if i_block == self.layer_idx:
+                break
+        x = x.permute(1, 0, 2)
+        x = self.model.ln_final(x)
+        return x
