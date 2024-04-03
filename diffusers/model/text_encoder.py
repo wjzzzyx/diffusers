@@ -142,7 +142,7 @@ class TextEncoderWeighted(TextEncoderUnlimited):
             tokens = list()
             weights = list()
             for phrase, weight in text_with_weights:
-                phrase_tokens = self.tokenize(phrase, truncation=False, add_special_tokens=False).input_ids
+                phrase_tokens = self.tokenize(phrase)
                 tokens.extend(phrase_tokens)
                 weights.extend([weight] * len(phrase_tokens))
             batch_tokens.append(tokens)
