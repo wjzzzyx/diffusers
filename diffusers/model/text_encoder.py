@@ -26,7 +26,10 @@ class TextEncoderUnlimited(nn.Module):
         return torch.concatenate(text_embs, dim=1)
 
     def get_tokens(self, texts):
-        return self.tokenizer(texts, truncation=False, add_special_tokens=False).input_ids
+        return self.tokenize(texts)
+    
+    def tokenize(self, texts):
+        raise NotImplementedError()
 
     def split_chunks(self, batch_tokens):
         batch_chunks = list()
@@ -139,7 +142,7 @@ class TextEncoderWeighted(TextEncoderUnlimited):
             tokens = list()
             weights = list()
             for phrase, weight in text_with_weights:
-                phrase_tokens = self.tokenizer(phrase, truncation=False, add_special_tokens=False).input_ids
+                phrase_tokens = self.tokenize(phrase, truncation=False, add_special_tokens=False).input_ids
                 tokens.extend(phrase_tokens)
                 weights.extend([weight] * len(phrase_tokens))
             batch_tokens.append(tokens)
@@ -220,6 +223,9 @@ class CLIPTextEncoder(TextEncoderWeighted):
     def device(self):
         return self.transformer.text_model.embeddings.token_embedding.weight.device
     
+    def tokenize(self, texts):
+        return self.tokenizer(texts, truncation=False, add_special_tokens=False).input_ids
+    
     def encode_batch_tokens(self, batch_tokens):
         batch_tokens = torch.asarray(batch_tokens, device=self.device)
         outputs = self.transformer(input_ids=batch_tokens, output_hidden_states=(self.layer == 'hidden'))
@@ -250,6 +256,9 @@ class OpenCLIPTextEncoder(TextEncoderWeighted):
     @property
     def device(self):
         return self.model.transformer.token_embedding.weight.device
+    
+    def tokenize(self, texts):
+        return [self.tokenizer.encode(text) for text in texts]
     
     def encode_batch_tokens(self, batch_tokens):
         batch_tokens = torch.asarray(batch_tokens, device=self.device)
