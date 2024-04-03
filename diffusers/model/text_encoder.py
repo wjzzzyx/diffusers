@@ -223,8 +223,9 @@ class CLIPTextEncoder(TextEncoderWeighted):
     def device(self):
         return self.transformer.text_model.embeddings.token_embedding.weight.device
     
-    def tokenize(self, texts):
-        return self.tokenizer(texts, truncation=False, add_special_tokens=False).input_ids
+    def tokenize(self, text):
+        # text is a single string
+        return self.tokenizer(text, truncation=False, add_special_tokens=False).input_ids
     
     def encode_batch_tokens(self, batch_tokens):
         batch_tokens = torch.asarray(batch_tokens, device=self.device)
@@ -250,15 +251,16 @@ class OpenCLIPTextEncoder(TextEncoderWeighted):
         self.bos_token_id = self.tokenizer.sot_token_id
         self.eos_token_id = self.tokenizer.eot_token_id
         self.model_max_length = self.tokenizer.context_length
-        self.comma_token_id = self.encoder[',</w>']
-        self.stop_token_id = self.encoder['.</w>']
+        self.comma_token_id = self.tokenizer.encoder[',</w>']
+        self.stop_token_id = self.tokenizer.encoder['.</w>']
     
     @property
     def device(self):
-        return self.model.transformer.token_embedding.weight.device
+        return self.model.token_embedding.weight.device
     
-    def tokenize(self, texts):
-        return [self.tokenizer.encode(text) for text in texts]
+    def tokenize(self, text):
+        # text is a single string
+        return self.tokenizer.encode(text)
     
     def encode_batch_tokens(self, batch_tokens):
         batch_tokens = torch.asarray(batch_tokens, device=self.device)

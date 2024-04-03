@@ -37,7 +37,9 @@ model:
           dropout: 0.0
       
       cond_stage_config:
-        target: ldm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+        target: diffusers.model.text_encoder.OpenCLIPTextEncoder
         params:
-          freeze: True
-          layer: 'penultimate'
+          arch: ViT-H-14
+          version: laion2b_s32b_b79k
+          layer: hidden
+          layer_idx: -2
