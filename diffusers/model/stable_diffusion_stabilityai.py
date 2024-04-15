@@ -249,17 +249,15 @@ class SpatialTransformer(nn.Module):
         else:
             self.proj_in = nn.Linear(in_channels, inner_dim)
 
-        self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
-                                   disable_self_attn=disable_self_attn, checkpoint=use_checkpoint)
-                for d in range(depth)]
-        )
+        self.transformer_blocks = nn.ModuleList([
+            BasicTransformerBlock(
+                inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
+                disable_self_attn=disable_self_attn, checkpoint=use_checkpoint
+            )
+            for d in range(depth)
+        ])
         if not use_linear:
-            self.proj_out = zero_module(nn.Conv2d(inner_dim,
-                                                  in_channels,
-                                                  kernel_size=1,
-                                                  stride=1,
-                                                  padding=0))
+            self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0))
         else:
             self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
         self.use_linear = use_linear
@@ -324,7 +322,7 @@ class Downsample(nn.Module):
                  downsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None,padding=1):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, kernel_size=3, padding=1):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -333,7 +331,7 @@ class Downsample(nn.Module):
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding
+                dims, self.channels, self.out_channels, kernel_size, stride=stride, padding=padding
             )
         else:
             assert self.channels == self.out_channels
@@ -353,14 +351,14 @@ class Upsample(nn.Module):
                  upsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, kernel_size=3, padding=1):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
         if use_conv:
-            self.conv = conv_nd(dims, self.channels, self.out_channels, 3, padding=padding)
+            self.conv = conv_nd(dims, self.channels, self.out_channels, kernel_size, padding=padding)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
@@ -393,23 +391,23 @@ class ResBlock(TimestepBlock):
 
     def __init__(
         self,
-        channels,
-        emb_channels,
-        dropout,
-        out_channels=None,
-        use_conv=False,
-        use_scale_shift_norm=False,
-        dims=2,
-        use_checkpoint=False,
-        up=False,
-        down=False,
+        channels: int,
+        emb_channels: int,
+        dropout: float,
+        out_channels: Optional[int] = None,
+        use_conv_in_skip: bool = False,
+        use_scale_shift_norm: bool = False,
+        dims: int = 2,
+        use_checkpoint: bool = False,
+        up: bool = False,
+        down: bool = False,
     ):
         super().__init__()
         self.channels = channels
         self.emb_channels = emb_channels
         self.dropout = dropout
         self.out_channels = out_channels or channels
-        self.use_conv = use_conv
+        self.use_conv_in_skip = use_conv_in_skip
         self.use_checkpoint = use_checkpoint
         self.use_scale_shift_norm = use_scale_shift_norm
 
@@ -448,7 +446,7 @@ class ResBlock(TimestepBlock):
 
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
-        elif use_conv:
+        elif use_conv_in_skip:
             self.skip_connection = conv_nd(
                 dims, channels, self.out_channels, 3, padding=1
             )

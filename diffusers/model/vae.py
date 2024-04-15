@@ -598,16 +598,17 @@ class AutoEncoderKL(nn.Module):
         ch_mult,
         num_res_blocks,
         attn_resolutions,
-        dropout = 0.0
+        dropout = 0.0,
+        attn_type = 'vanilla'
     ):
         super().__init__()
         self.encoder = Encoder(
             in_channels, base_channels, z_channels, ch_mult, num_res_blocks,
-            attn_resolutions, resolution=256, dropout=dropout, double_z=True
+            attn_resolutions, resolution=256, dropout=dropout, double_z=True, attn_type=attn_type
         )
         self.decoder = Decoder(
             base_channels, out_channels, z_channels, ch_mult, num_res_blocks,
-            attn_resolutions, resolution=256, dropout=dropout
+            attn_resolutions, resolution=256, dropout=dropout, attn_type=attn_type
         )
         self.quant_conv = nn.Conv2d(2 * z_channels, 2 * z_channels, 1)
         self.post_quant_conv = nn.Conv2d(z_channels, z_channels, 1)

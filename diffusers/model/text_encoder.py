@@ -201,16 +201,13 @@ class TextEncoderWeighted(TextEncoderUnlimited):
 class CLIPTextEncoder(TextEncoderWeighted):
     """Uses the CLIP transformer encoder for text (from huggingface)"""
 
-    def __init__(self, version="openai/clip-vit-large-patch14", layer="last", layer_idx=None):
+    def __init__(self, version="openai/clip-vit-large-patch14", layer="last", layer_idx=-1):
         super().__init__()
         assert layer in self.LAYERS
         self.tokenizer = CLIPTokenizer.from_pretrained(version)
         self.transformer = CLIPTextModel.from_pretrained(version)
         self.layer = layer
         self.layer_idx = layer_idx
-        if layer == "hidden":
-            assert layer_idx is not None
-            assert 0 <= abs(layer_idx) <= 12
         
         vocab = self.tokenizer.get_vocab()
         self.bos_token_id = self.tokenizer.bos_token_id
@@ -274,3 +271,49 @@ class OpenCLIPTextEncoder(TextEncoderWeighted):
         x = x.permute(1, 0, 2)
         x = self.model.ln_final(x)
         return x
+
+
+class OpenCLIPTextEncoderPooled(OpenCLIPTextEncoder):
+    def forward(self, texts):
+        texts_with_weights = self.parse_weighted_text(texts)
+        tokens, weights = self.get_tokens(texts_with_weights)
+        chunks, chunk_weights = self.split_chunks(tokens, weights)    # list(batch) of list(chunk)
+        chunks_input = list(map(list, zip(*chunks)))    # list(chunk) of list(batch)
+
+        text_embs = list()
+        last_embs_for_pool = list()
+        for chunk in chunks_input:
+            emb, last = self.encode_batch_tokens(chunk)
+            text_embs.append(emb)
+            last_embs_for_pool.append(last)
+        text_embs = torch.concatenate(text_embs, dim=1)    # shape (batch, seq, emb)
+        
+        weights = torch.asarray(chunk_weights, device=self.device).view(len(chunk_weights), -1)
+        original_mean = text_embs.mean(dim=(1, 2))
+        text_embs = text_embs * weights.unsqueeze(-1)
+        new_mean = text_embs.mean(dim=(1, 2))
+        text_embs = text_embs * (original_mean / new_mean)[:, None, None]
+
+        batch_size = len(texts)
+        pooled_embs = last_embs_for_pool[0][
+            torch.arange(batch_size, device=self.device),
+            chunks_input[0].argmax(dim=-1)
+        ]
+        pooled_embs = pooled_embs @ self.model.text_projection
+
+        return text_embs, pooled_embs
+
+    def encode_batch_tokens(self, batch_tokens):
+        batch_tokens = torch.asarray(batch_tokens, device=self.device)
+        x = self.model.token_embedding(batch_tokens)
+        x = x + self.model.positional_embedding
+        x = x.permute(1, 0, 2)    # shape (seq, batch, emb)
+        for i_block, block in enumerate(self.model.transformer.resblocks):
+            x = block(x, attn_mask=self.model.attn_mask)
+            if i_block == self.layer_idx:
+                out = x
+        out = out.permute(1, 0, 2)
+        out = self.model.ln_final(out)    # should we normalize this?
+        x = x.permute(1, 0, 2)
+        x = self.model.ln_final(x)
+        return out
