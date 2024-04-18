@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Any, List
+import xformers
 
 from diffusers.model.discriminator import NLayerDiscriminator
 from diffusers.loss.lpips import LPIPS

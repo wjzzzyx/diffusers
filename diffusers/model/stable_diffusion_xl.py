@@ -63,431 +63,431 @@ import torch_utils
 import utils
 
 
-class CrossAttention(nn.Module):
-    def __init__(
-        self,
-        query_dim,
-        context_dim=None,
-        heads=8,
-        dim_head=64,
-        dropout=0.0,
-        backend=None,
-    ):
-        super().__init__()
-        inner_dim = dim_head * heads
-        context_dim = context_dim if context_dim is not None else query_dim
+# class CrossAttention(nn.Module):
+#     def __init__(
+#         self,
+#         query_dim,
+#         context_dim=None,
+#         heads=8,
+#         dim_head=64,
+#         dropout=0.0,
+#         backend=None,
+#     ):
+#         super().__init__()
+#         inner_dim = dim_head * heads
+#         context_dim = context_dim if context_dim is not None else query_dim
 
-        self.scale = dim_head**-0.5
-        self.heads = heads
+#         self.scale = dim_head ** -0.5
+#         self.heads = heads
 
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+#         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+#         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+#         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
 
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
-        )
-        self.backend = backend
+#         self.to_out = nn.Sequential(
+#             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
+#         )
+#         self.backend = backend
 
-    def forward(
-        self,
-        x,
-        context=None,
-        mask=None,
-        additional_tokens=None,
-        n_times_crossframe_attn_in_self=0,
-    ):
-        h = self.heads
+#     def forward(
+#         self,
+#         x,
+#         context=None,
+#         mask=None,
+#         additional_tokens=None,
+#         n_times_crossframe_attn_in_self=0,
+#     ):
+#         h = self.heads
 
-        if additional_tokens is not None:
-            # get the number of masked tokens at the beginning of the output sequence
-            n_tokens_to_mask = additional_tokens.shape[1]
-            # add additional token
-            x = torch.cat([additional_tokens, x], dim=1)
+#         if additional_tokens is not None:
+#             # get the number of masked tokens at the beginning of the output sequence
+#             n_tokens_to_mask = additional_tokens.shape[1]
+#             # add additional token
+#             x = torch.cat([additional_tokens, x], dim=1)
 
-        q = self.to_q(x)
-        context = context if context is not None else x
-        k = self.to_k(context)
-        v = self.to_v(context)
+#         q = self.to_q(x)
+#         context = context if context is not None else x
+#         k = self.to_k(context)
+#         v = self.to_v(context)
 
-        if n_times_crossframe_attn_in_self:
-            # reprogramming cross-frame attention as in https://arxiv.org/abs/2303.13439
-            assert x.shape[0] % n_times_crossframe_attn_in_self == 0
-            n_cp = x.shape[0] // n_times_crossframe_attn_in_self
-            k = einops.repeat(
-                k[::n_times_crossframe_attn_in_self], "b ... -> (b n) ...", n=n_cp
-            )
-            v = einops.repeat(
-                v[::n_times_crossframe_attn_in_self], "b ... -> (b n) ...", n=n_cp
-            )
+#         if n_times_crossframe_attn_in_self:
+#             # reprogramming cross-frame attention as in https://arxiv.org/abs/2303.13439
+#             assert x.shape[0] % n_times_crossframe_attn_in_self == 0
+#             n_cp = x.shape[0] // n_times_crossframe_attn_in_self
+#             k = einops.repeat(
+#                 k[::n_times_crossframe_attn_in_self], "b ... -> (b n) ...", n=n_cp
+#             )
+#             v = einops.repeat(
+#                 v[::n_times_crossframe_attn_in_self], "b ... -> (b n) ...", n=n_cp
+#             )
 
-        q, k, v = map(lambda t: einops.rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
+#         q, k, v = map(lambda t: einops.rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
 
-        ## old
-        """
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
-        del q, k
+#         ## old
+#         """
+#         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+#         del q, k
 
-        if exists(mask):
-            mask = rearrange(mask, 'b ... -> b (...)')
-            max_neg_value = -torch.finfo(sim.dtype).max
-            mask = repeat(mask, 'b j -> (b h) () j', h=h)
-            sim.masked_fill_(~mask, max_neg_value)
+#         if exists(mask):
+#             mask = rearrange(mask, 'b ... -> b (...)')
+#             max_neg_value = -torch.finfo(sim.dtype).max
+#             mask = repeat(mask, 'b j -> (b h) () j', h=h)
+#             sim.masked_fill_(~mask, max_neg_value)
 
-        # attention, what we cannot get enough of
-        sim = sim.softmax(dim=-1)
+#         # attention, what we cannot get enough of
+#         sim = sim.softmax(dim=-1)
 
-        out = einsum('b i j, b j d -> b i d', sim, v)
-        """
-        ## new
-        with sdp_kernel(**BACKEND_MAP[self.backend]):
-            # print("dispatching into backend", self.backend, "q/k/v shape: ", q.shape, k.shape, v.shape)
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask
-            )  # scale is dim_head ** -0.5 per default
+#         out = einsum('b i j, b j d -> b i d', sim, v)
+#         """
+#         ## new
+#         with sdp_kernel(**BACKEND_MAP[self.backend]):
+#             # print("dispatching into backend", self.backend, "q/k/v shape: ", q.shape, k.shape, v.shape)
+#             out = F.scaled_dot_product_attention(
+#                 q, k, v, attn_mask=mask
+#             )  # scale is dim_head ** -0.5 per default
 
-        del q, k, v
-        out = einops.rearrange(out, "b h n d -> b n (h d)", h=h)
+#         del q, k, v
+#         out = einops.rearrange(out, "b h n d -> b n (h d)", h=h)
 
-        if additional_tokens is not None:
-            # remove additional token
-            out = out[:, n_tokens_to_mask:]
-        return self.to_out(out)
-
-
-class MemoryEfficientCrossAttention(nn.Module):
-    # https://github.com/MatthieuTPHR/diffusers/blob/d80b531ff8060ec1ea982b65a1b8df70f73aa67c/src/diffusers/models/attention.py#L223
-    def __init__(
-        self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0, **kwargs
-    ):
-        super().__init__()
-        logger.debug(
-            f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, "
-            f"context_dim is {context_dim} and using {heads} heads with a "
-            f"dimension of {dim_head}."
-        )
-        inner_dim = dim_head * heads
-        context_dim = context_dim if context_dim is not None else query_dim
-
-        self.heads = heads
-        self.dim_head = dim_head
-
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
-        )
-        self.attention_op: Optional[Any] = None
-
-    def forward(
-        self,
-        x,
-        context=None,
-        mask=None,
-        additional_tokens=None,
-        n_times_crossframe_attn_in_self=0,
-    ):
-        if additional_tokens is not None:
-            # get the number of masked tokens at the beginning of the output sequence
-            n_tokens_to_mask = additional_tokens.shape[1]
-            # add additional token
-            x = torch.cat([additional_tokens, x], dim=1)
-        q = self.to_q(x)
-        context = context if context is not None else x
-        k = self.to_k(context)
-        v = self.to_v(context)
-
-        if n_times_crossframe_attn_in_self:
-            # reprogramming cross-frame attention as in https://arxiv.org/abs/2303.13439
-            assert x.shape[0] % n_times_crossframe_attn_in_self == 0
-            # n_cp = x.shape[0]//n_times_crossframe_attn_in_self
-            k = einops.repeat(
-                k[::n_times_crossframe_attn_in_self],
-                "b ... -> (b n) ...",
-                n=n_times_crossframe_attn_in_self,
-            )
-            v = einops.repeat(
-                v[::n_times_crossframe_attn_in_self],
-                "b ... -> (b n) ...",
-                n=n_times_crossframe_attn_in_self,
-            )
-
-        b, _, _ = q.shape
-        q, k, v = map(
-            lambda t: t.unsqueeze(3)
-            .reshape(b, t.shape[1], self.heads, self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b * self.heads, t.shape[1], self.dim_head)
-            .contiguous(),
-            (q, k, v),
-        )
-
-        # actually compute the attention, what we cannot get enough of
-        if version.parse(xformers.__version__) >= version.parse("0.0.21"):
-            # NOTE: workaround for
-            # https://github.com/facebookresearch/xformers/issues/845
-            max_bs = 32768
-            N = q.shape[0]
-            n_batches = math.ceil(N / max_bs)
-            out = list()
-            for i_batch in range(n_batches):
-                batch = slice(i_batch * max_bs, (i_batch + 1) * max_bs)
-                out.append(
-                    xformers.ops.memory_efficient_attention(
-                        q[batch],
-                        k[batch],
-                        v[batch],
-                        attn_bias=None,
-                        op=self.attention_op,
-                    )
-                )
-            out = torch.cat(out, 0)
-        else:
-            out = xformers.ops.memory_efficient_attention(
-                q, k, v, attn_bias=None, op=self.attention_op
-            )
-
-        # TODO: Use this directly in the attention operation, as a bias
-        if mask is not None:
-            raise NotImplementedError
-        out = (
-            out.unsqueeze(0)
-            .reshape(b, self.heads, out.shape[1], self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b, out.shape[1], self.heads * self.dim_head)
-        )
-        if additional_tokens is not None:
-            # remove additional token
-            out = out[:, n_tokens_to_mask:]
-        return self.to_out(out)
+#         if additional_tokens is not None:
+#             # remove additional token
+#             out = out[:, n_tokens_to_mask:]
+#         return self.to_out(out)
 
 
-class BasicTransformerBlock(nn.Module):
-    ATTENTION_MODES = {
-        "softmax": CrossAttention,  # vanilla attention
-        "softmax-xformers": MemoryEfficientCrossAttention,  # ampere
-    }
+# class MemoryEfficientCrossAttention(nn.Module):
+#     # https://github.com/MatthieuTPHR/diffusers/blob/d80b531ff8060ec1ea982b65a1b8df70f73aa67c/src/diffusers/models/attention.py#L223
+#     def __init__(
+#         self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0, **kwargs
+#     ):
+#         super().__init__()
+#         logger.debug(
+#             f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, "
+#             f"context_dim is {context_dim} and using {heads} heads with a "
+#             f"dimension of {dim_head}."
+#         )
+#         inner_dim = dim_head * heads
+#         context_dim = context_dim if context_dim is not None else query_dim
 
-    def __init__(
-        self,
-        dim,
-        n_heads,
-        d_head,
-        dropout=0.0,
-        context_dim=None,
-        gated_ff=True,
-        checkpoint=True,
-        disable_self_attn=False,
-        attn_mode="softmax",
-        sdp_backend=None,
-    ):
-        super().__init__()
-        assert attn_mode in self.ATTENTION_MODES
-        if attn_mode != "softmax" and not XFORMERS_IS_AVAILABLE:
-            logger.warn(
-                f"Attention mode '{attn_mode}' is not available. Falling "
-                f"back to native attention. This is not a problem in "
-                f"Pytorch >= 2.0. FYI, you are running with PyTorch "
-                f"version {torch.__version__}."
-            )
-            attn_mode = "softmax"
-        elif attn_mode == "softmax" and not SDP_IS_AVAILABLE:
-            logger.warn(
-                "We do not support vanilla attention anymore, as it is too "
-                "expensive. Sorry."
-            )
-            if not XFORMERS_IS_AVAILABLE:
-                assert (
-                    False
-                ), "Please install xformers via e.g. 'pip install xformers==0.0.16'"
-            else:
-                logger.info("Falling back to xformers efficient attention.")
-                attn_mode = "softmax-xformers"
-        attn_cls = self.ATTENTION_MODES[attn_mode]
-        if version.parse(torch.__version__) >= version.parse("2.0.0"):
-            assert sdp_backend is None or isinstance(sdp_backend, SDPBackend)
-        else:
-            assert sdp_backend is None
-        self.disable_self_attn = disable_self_attn
-        self.attn1 = attn_cls(
-            query_dim=dim,
-            heads=n_heads,
-            dim_head=d_head,
-            dropout=dropout,
-            context_dim=context_dim if self.disable_self_attn else None,
-            backend=sdp_backend,
-        )  # is a self-attention if not self.disable_self_attn
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
-        self.attn2 = attn_cls(
-            query_dim=dim,
-            context_dim=context_dim,
-            heads=n_heads,
-            dim_head=d_head,
-            dropout=dropout,
-            backend=sdp_backend,
-        )  # is self-attn if context is none
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm3 = nn.LayerNorm(dim)
-        self.checkpoint = checkpoint
-        if self.checkpoint:
-            logger.debug(f"{self.__class__.__name__} is using checkpointing")
+#         self.heads = heads
+#         self.dim_head = dim_head
 
-    def forward(
-        self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
-    ):
-        kwargs = {"x": x}
+#         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+#         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+#         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
 
-        if context is not None:
-            kwargs.update({"context": context})
+#         self.to_out = nn.Sequential(
+#             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
+#         )
+#         self.attention_op: Optional[Any] = None
 
-        if additional_tokens is not None:
-            kwargs.update({"additional_tokens": additional_tokens})
+#     def forward(
+#         self,
+#         x,
+#         context=None,
+#         mask=None,
+#         additional_tokens=None,
+#         n_times_crossframe_attn_in_self=0,
+#     ):
+#         if additional_tokens is not None:
+#             # get the number of masked tokens at the beginning of the output sequence
+#             n_tokens_to_mask = additional_tokens.shape[1]
+#             # add additional token
+#             x = torch.cat([additional_tokens, x], dim=1)
+#         q = self.to_q(x)
+#         context = context if context is not None else x
+#         k = self.to_k(context)
+#         v = self.to_v(context)
 
-        if n_times_crossframe_attn_in_self:
-            kwargs.update(
-                {"n_times_crossframe_attn_in_self": n_times_crossframe_attn_in_self}
-            )
+#         if n_times_crossframe_attn_in_self:
+#             # reprogramming cross-frame attention as in https://arxiv.org/abs/2303.13439
+#             assert x.shape[0] % n_times_crossframe_attn_in_self == 0
+#             # n_cp = x.shape[0]//n_times_crossframe_attn_in_self
+#             k = einops.repeat(
+#                 k[::n_times_crossframe_attn_in_self],
+#                 "b ... -> (b n) ...",
+#                 n=n_times_crossframe_attn_in_self,
+#             )
+#             v = einops.repeat(
+#                 v[::n_times_crossframe_attn_in_self],
+#                 "b ... -> (b n) ...",
+#                 n=n_times_crossframe_attn_in_self,
+#             )
 
-        # return mixed_checkpoint(self._forward, kwargs, self.parameters(), self.checkpoint)
-        if self.checkpoint:
-            # inputs = {"x": x, "context": context}
-            return checkpoint(self._forward, x, context)
-            # return checkpoint(self._forward, inputs, self.parameters(), self.checkpoint)
-        else:
-            return self._forward(**kwargs)
+#         b, _, _ = q.shape
+#         q, k, v = map(
+#             lambda t: t.unsqueeze(3)
+#             .reshape(b, t.shape[1], self.heads, self.dim_head)
+#             .permute(0, 2, 1, 3)
+#             .reshape(b * self.heads, t.shape[1], self.dim_head)
+#             .contiguous(),
+#             (q, k, v),
+#         )
 
-    def _forward(
-        self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
-    ):
-        x = (
-            self.attn1(
-                self.norm1(x),
-                context=context if self.disable_self_attn else None,
-                additional_tokens=additional_tokens,
-                n_times_crossframe_attn_in_self=n_times_crossframe_attn_in_self
-                if not self.disable_self_attn
-                else 0,
-            )
-            + x
-        )
-        x = (
-            self.attn2(
-                self.norm2(x), context=context, additional_tokens=additional_tokens
-            )
-            + x
-        )
-        x = self.ff(self.norm3(x)) + x
-        return x
+#         # actually compute the attention, what we cannot get enough of
+#         if version.parse(xformers.__version__) >= version.parse("0.0.21"):
+#             # NOTE: workaround for
+#             # https://github.com/facebookresearch/xformers/issues/845
+#             max_bs = 32768
+#             N = q.shape[0]
+#             n_batches = math.ceil(N / max_bs)
+#             out = list()
+#             for i_batch in range(n_batches):
+#                 batch = slice(i_batch * max_bs, (i_batch + 1) * max_bs)
+#                 out.append(
+#                     xformers.ops.memory_efficient_attention(
+#                         q[batch],
+#                         k[batch],
+#                         v[batch],
+#                         attn_bias=None,
+#                         op=self.attention_op,
+#                     )
+#                 )
+#             out = torch.cat(out, 0)
+#         else:
+#             out = xformers.ops.memory_efficient_attention(
+#                 q, k, v, attn_bias=None, op=self.attention_op
+#             )
+
+#         # TODO: Use this directly in the attention operation, as a bias
+#         if mask is not None:
+#             raise NotImplementedError
+#         out = (
+#             out.unsqueeze(0)
+#             .reshape(b, self.heads, out.shape[1], self.dim_head)
+#             .permute(0, 2, 1, 3)
+#             .reshape(b, out.shape[1], self.heads * self.dim_head)
+#         )
+#         if additional_tokens is not None:
+#             # remove additional token
+#             out = out[:, n_tokens_to_mask:]
+#         return self.to_out(out)
 
 
-class SpatialTransformer(nn.Module):
-    """
-    Transformer block for image-like data.
-    First, project the input (aka embedding)
-    and reshape to b, t, d.
-    Then apply standard transformer action.
-    Finally, reshape to image
-    NEW: use_linear for more efficiency instead of the 1x1 convs
-    """
+# class BasicTransformerBlock(nn.Module):
+#     ATTENTION_MODES = {
+#         "softmax": CrossAttention,  # vanilla attention
+#         "softmax-xformers": MemoryEfficientCrossAttention,  # ampere
+#     }
 
-    def __init__(
-        self,
-        in_channels,
-        n_heads,
-        d_head,
-        depth=1,
-        dropout=0.0,
-        context_dim=None,
-        disable_self_attn=False,
-        use_linear=False,
-        attn_type="softmax",
-        use_checkpoint=True,
-        # sdp_backend=SDPBackend.FLASH_ATTENTION
-        sdp_backend=None,
-    ):
-        super().__init__()
-        logger.debug(
-            f"constructing {self.__class__.__name__} of depth {depth} w/ "
-            f"{in_channels} channels and {n_heads} heads."
-        )
+#     def __init__(
+#         self,
+#         dim,
+#         n_heads,
+#         d_head,
+#         dropout=0.0,
+#         context_dim=None,
+#         gated_ff=True,
+#         checkpoint=True,
+#         disable_self_attn=False,
+#         attn_mode="softmax",
+#         sdp_backend=None,
+#     ):
+#         super().__init__()
+#         assert attn_mode in self.ATTENTION_MODES
+#         if attn_mode != "softmax" and not XFORMERS_IS_AVAILABLE:
+#             logger.warn(
+#                 f"Attention mode '{attn_mode}' is not available. Falling "
+#                 f"back to native attention. This is not a problem in "
+#                 f"Pytorch >= 2.0. FYI, you are running with PyTorch "
+#                 f"version {torch.__version__}."
+#             )
+#             attn_mode = "softmax"
+#         elif attn_mode == "softmax" and not SDP_IS_AVAILABLE:
+#             logger.warn(
+#                 "We do not support vanilla attention anymore, as it is too "
+#                 "expensive. Sorry."
+#             )
+#             if not XFORMERS_IS_AVAILABLE:
+#                 assert (
+#                     False
+#                 ), "Please install xformers via e.g. 'pip install xformers==0.0.16'"
+#             else:
+#                 logger.info("Falling back to xformers efficient attention.")
+#                 attn_mode = "softmax-xformers"
+#         attn_cls = self.ATTENTION_MODES[attn_mode]
+#         if version.parse(torch.__version__) >= version.parse("2.0.0"):
+#             assert sdp_backend is None or isinstance(sdp_backend, SDPBackend)
+#         else:
+#             assert sdp_backend is None
+#         self.disable_self_attn = disable_self_attn
+#         self.attn1 = attn_cls(
+#             query_dim=dim,
+#             heads=n_heads,
+#             dim_head=d_head,
+#             dropout=dropout,
+#             context_dim=context_dim if self.disable_self_attn else None,
+#             backend=sdp_backend,
+#         )  # is a self-attention if not self.disable_self_attn
+#         self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+#         self.attn2 = attn_cls(
+#             query_dim=dim,
+#             context_dim=context_dim,
+#             heads=n_heads,
+#             dim_head=d_head,
+#             dropout=dropout,
+#             backend=sdp_backend,
+#         )  # is self-attn if context is none
+#         self.norm1 = nn.LayerNorm(dim)
+#         self.norm2 = nn.LayerNorm(dim)
+#         self.norm3 = nn.LayerNorm(dim)
+#         self.checkpoint = checkpoint
+#         if self.checkpoint:
+#             logger.debug(f"{self.__class__.__name__} is using checkpointing")
 
-        if context_dim is not None and not isinstance(context_dim, list):
-            context_dim = [context_dim]
-        if context_dim is not None and isinstance(context_dim, list):
-            if depth != len(context_dim):
-                logger.warn(
-                    f"{self.__class__.__name__}: Found context dims "
-                    f"{context_dim} of depth {len(context_dim)}, which does not "
-                    f"match the specified 'depth' of {depth}. Setting context_dim "
-                    f"to {depth * [context_dim[0]]} now."
-                )
-                # depth does not match context dims.
-                assert all(
-                    map(lambda x: x == context_dim[0], context_dim)
-                ), "need homogenous context_dim to match depth automatically"
-                context_dim = depth * [context_dim[0]]
-        elif context_dim is None:
-            context_dim = [None] * depth
-        self.in_channels = in_channels
-        inner_dim = n_heads * d_head
-        self.norm = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
-        if not use_linear:
-            self.proj_in = nn.Conv2d(
-                in_channels, inner_dim, kernel_size=1, stride=1, padding=0
-            )
-        else:
-            self.proj_in = nn.Linear(in_channels, inner_dim)
+#     def forward(
+#         self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
+#     ):
+#         kwargs = {"x": x}
 
-        self.transformer_blocks = nn.ModuleList(
-            [
-                BasicTransformerBlock(
-                    inner_dim,
-                    n_heads,
-                    d_head,
-                    dropout=dropout,
-                    context_dim=context_dim[d],
-                    disable_self_attn=disable_self_attn,
-                    attn_mode=attn_type,
-                    checkpoint=use_checkpoint,
-                    sdp_backend=sdp_backend,
-                )
-                for d in range(depth)
-            ]
-        )
-        if not use_linear:
-            self.proj_out = zero_module(
-                nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
-            )
-        else:
-            # self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
-            self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
-        self.use_linear = use_linear
+#         if context is not None:
+#             kwargs.update({"context": context})
 
-    def forward(self, x, context=None):
-        # note: if no context is given, cross-attention defaults to self-attention
-        if not isinstance(context, list):
-            context = [context]
-        b, c, h, w = x.shape
-        x_in = x
-        x = self.norm(x)
-        if not self.use_linear:
-            x = self.proj_in(x)
-        x = einops.rearrange(x, "b c h w -> b (h w) c").contiguous()
-        if self.use_linear:
-            x = self.proj_in(x)
-        for i, block in enumerate(self.transformer_blocks):
-            if i > 0 and len(context) == 1:
-                i = 0  # use same context for each block
-            x = block(x, context=context[i])
-        if self.use_linear:
-            x = self.proj_out(x)
-        x = einops.rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
-        if not self.use_linear:
-            x = self.proj_out(x)
-        return x + x_in
+#         if additional_tokens is not None:
+#             kwargs.update({"additional_tokens": additional_tokens})
+
+#         if n_times_crossframe_attn_in_self:
+#             kwargs.update(
+#                 {"n_times_crossframe_attn_in_self": n_times_crossframe_attn_in_self}
+#             )
+
+#         # return mixed_checkpoint(self._forward, kwargs, self.parameters(), self.checkpoint)
+#         if self.checkpoint:
+#             # inputs = {"x": x, "context": context}
+#             return checkpoint(self._forward, x, context)
+#             # return checkpoint(self._forward, inputs, self.parameters(), self.checkpoint)
+#         else:
+#             return self._forward(**kwargs)
+
+#     def _forward(
+#         self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
+#     ):
+#         x = (
+#             self.attn1(
+#                 self.norm1(x),
+#                 context=context if self.disable_self_attn else None,
+#                 additional_tokens=additional_tokens,
+#                 n_times_crossframe_attn_in_self=n_times_crossframe_attn_in_self
+#                 if not self.disable_self_attn
+#                 else 0,
+#             )
+#             + x
+#         )
+#         x = (
+#             self.attn2(
+#                 self.norm2(x), context=context, additional_tokens=additional_tokens
+#             )
+#             + x
+#         )
+#         x = self.ff(self.norm3(x)) + x
+#         return x
+
+
+# class SpatialTransformer(nn.Module):
+#     """
+#     Transformer block for image-like data.
+#     First, project the input (aka embedding)
+#     and reshape to b, t, d.
+#     Then apply standard transformer action.
+#     Finally, reshape to image
+#     NEW: use_linear for more efficiency instead of the 1x1 convs
+#     """
+
+#     def __init__(
+#         self,
+#         in_channels,
+#         n_heads,
+#         d_head,
+#         depth=1,
+#         dropout=0.0,
+#         context_dim=None,
+#         disable_self_attn=False,
+#         use_linear=False,
+#         attn_type="softmax",
+#         use_checkpoint=True,
+#         # sdp_backend=SDPBackend.FLASH_ATTENTION
+#         sdp_backend=None,
+#     ):
+#         super().__init__()
+#         logger.debug(
+#             f"constructing {self.__class__.__name__} of depth {depth} w/ "
+#             f"{in_channels} channels and {n_heads} heads."
+#         )
+
+#         if context_dim is not None and not isinstance(context_dim, list):
+#             context_dim = [context_dim]
+#         if context_dim is not None and isinstance(context_dim, list):
+#             if depth != len(context_dim):
+#                 logger.warn(
+#                     f"{self.__class__.__name__}: Found context dims "
+#                     f"{context_dim} of depth {len(context_dim)}, which does not "
+#                     f"match the specified 'depth' of {depth}. Setting context_dim "
+#                     f"to {depth * [context_dim[0]]} now."
+#                 )
+#                 # depth does not match context dims.
+#                 assert all(
+#                     map(lambda x: x == context_dim[0], context_dim)
+#                 ), "need homogenous context_dim to match depth automatically"
+#                 context_dim = depth * [context_dim[0]]
+#         elif context_dim is None:
+#             context_dim = [None] * depth
+#         self.in_channels = in_channels
+#         inner_dim = n_heads * d_head
+#         self.norm = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
+#         if not use_linear:
+#             self.proj_in = nn.Conv2d(
+#                 in_channels, inner_dim, kernel_size=1, stride=1, padding=0
+#             )
+#         else:
+#             self.proj_in = nn.Linear(in_channels, inner_dim)
+
+#         self.transformer_blocks = nn.ModuleList(
+#             [
+#                 BasicTransformerBlock(
+#                     inner_dim,
+#                     n_heads,
+#                     d_head,
+#                     dropout=dropout,
+#                     context_dim=context_dim[d],
+#                     disable_self_attn=disable_self_attn,
+#                     attn_mode=attn_type,
+#                     checkpoint=use_checkpoint,
+#                     sdp_backend=sdp_backend,
+#                 )
+#                 for d in range(depth)
+#             ]
+#         )
+#         if not use_linear:
+#             self.proj_out = zero_module(
+#                 nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
+#             )
+#         else:
+#             # self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
+#             self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
+#         self.use_linear = use_linear
+
+#     def forward(self, x, context=None):
+#         # note: if no context is given, cross-attention defaults to self-attention
+#         if not isinstance(context, list):
+#             context = [context]
+#         b, c, h, w = x.shape
+#         x_in = x
+#         x = self.norm(x)
+#         if not self.use_linear:
+#             x = self.proj_in(x)
+#         x = einops.rearrange(x, "b c h w -> b (h w) c").contiguous()
+#         if self.use_linear:
+#             x = self.proj_in(x)
+#         for i, block in enumerate(self.transformer_blocks):
+#             if i > 0 and len(context) == 1:
+#                 i = 0  # use same context for each block
+#             x = block(x, context=context[i])
+#         if self.use_linear:
+#             x = self.proj_out(x)
+#         x = einops.rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
+#         if not self.use_linear:
+#             x = self.proj_out(x)
+#         return x + x_in
 
 
 class ResBlock(TimestepBlock):
@@ -1192,6 +1192,10 @@ class StableDiffusionXL(nn.Module):
         self.first_stage_model.eval()
         self.first_stage_model.requires_grad_(False)
     
+    @property
+    def device(self):
+        return self.diffusion_model.time_embed[0].weight.device
+    
     def forward_diffusion_model(self, xt, t, cond_prompt):
         output = self.diffusion_model(xt, t, context=cond_prompt)
         return output
@@ -1209,6 +1213,12 @@ class StableDiffusionXL(nn.Module):
     def decode_first_stage(self, z):
         z = 1. / self.scale_factor * z
         return self.first_stage_model.decode(z)
+
+
+class StableDiffusionXL_CondEmb(StableDiffusionXL):
+    def forward_diffusion_model(self, xt, t, cond_prompt, cond_emb):
+        output = self.diffusion_model(xt, t, context=cond_prompt, y=cond_emb)
+        return output
     
 
 class PLBase(lightning.LightningModule):

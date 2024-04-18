@@ -181,8 +181,8 @@ class TextEncoderWeighted(TextEncoderUnlimited):
         chunks.append(tokens[last:])
         chunk_weights.append(weights[last:])
 
-        chunks = [chunk for chunk in chunks if chunk != []]
-        chunk_weights = [w for w in chunk_weights if w != []]
+        chunks = [chunk for ichunk, chunk in enumerate(chunks) if ichunk == 0 or chunk != []]
+        chunk_weights = [w for ichunk, w in enumerate(chunk_weights) if ichunk == 0 or w != []]
 
         # pad each chunk to be model_max_length
         for ichunk in range(len(chunks)):
@@ -295,9 +295,10 @@ class OpenCLIPTextEncoderPooled(OpenCLIPTextEncoder):
         text_embs = text_embs * (original_mean / new_mean)[:, None, None]
 
         batch_size = len(texts)
+        eos_position = torch.asarray(chunks_input[0]).argmax(dim=-1)
         pooled_embs = last_embs_for_pool[0][
             torch.arange(batch_size, device=self.device),
-            chunks_input[0].argmax(dim=-1)
+            eos_position
         ]
         pooled_embs = pooled_embs @ self.model.text_projection
 
@@ -316,4 +317,4 @@ class OpenCLIPTextEncoderPooled(OpenCLIPTextEncoder):
         out = self.model.ln_final(out)    # should we normalize this?
         x = x.permute(1, 0, 2)
         x = self.model.ln_final(x)
-        return out
+        return out, x
