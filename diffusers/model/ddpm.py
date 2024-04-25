@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from . import ema
 from .modules import unet_2d
+from diffusers.sampler.denoiser import DiscreteTimeEpsDenoiser
 import utils
 
 
@@ -27,21 +28,10 @@ class DDPM(nn.Module):
     
     def forward(self, xt, t):
         output = self.unet(xt, t)
-        # epsilon, x0
-        # if self.prediction_type == 'epsilon':
-        #     epsilon = output
-        #     sample = (xt - torch.sqrt(1 - alpha_cumprod_t) * output) / torch.sqrt(alpha_cumprod_t)
-        # elif self.prediction_type == 'sample':
-        #     sample = output
-        #     epsilon = (xt - torch.sqrt(alpha_cumprod_t) * output) / torch.sqrt(1 - alpha_cumprod_t)
-        # elif self.prediction_type == 'v_prediction':
-        #     raise NotImplementedError('v_prediction is not implemented for DDPM.')
-
-        # return {
-        #     'epsilon': epsilon,
-        #     'sample': sample,
-        # }
         return output
+    
+    def forward_diffusion_model(self, xt, t):
+        return self(xt, t)
 
     def _convert_deprecated_attention_blocks(self, state_dict: collections.OrderedDict):
         for key in list(state_dict.keys()):
@@ -76,6 +66,7 @@ class PLBase(lightning.LightningModule):
             )
         
         self.sampler = utils.instantiate_from_config(sampler_config)
+        self.denoiser = DiscreteTimeEpsDenoiser(self.model, self.sampler.alphas_cumprod.cuda())
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
@@ -91,7 +82,7 @@ class PLBase(lightning.LightningModule):
         batch_size = len(batch['fname'])
         in_channels = self.model.unet.config.in_channels
         image_size = self.model.unet.config.sample_size
-        samples = self.sampler.sample(self.model, batch_size, [in_channels, image_size, image_size])
+        samples = self.sampler.sample(self.denoiser, batch_size, [in_channels, image_size, image_size])
         samples = (samples + 1) / 2
         log_image_dict = {
             'image': samples,

@@ -40,8 +40,8 @@ class DDIMSampler():
         sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / alpha_cumprod_t_next)
         
         pred_x0 = denoised
-        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
         pred_z = (xt - torch.sqrt(alpha_cumprod_t) * denoised) / torch.sqrt(1 - alpha_cumprod_t)
+        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
         cur_mean = torch.sqrt(alpha_cumprod_t_next) * pred_x0 + torch.sqrt(1 - alpha_cumprod_t_next - sigma_t ** 2) * pred_z
 
@@ -58,9 +58,9 @@ class DDIMSampler():
         self,
         denoiser,
         batch_size: int,
-        image_shape: Sequence,
-        denoiser_args: dict,
+        image_shape: Sequence = None,
         image: torch.Tensor = None,
+        denoiser_args: dict = {},
         generator=None
     ) -> torch.Tensor:
         """

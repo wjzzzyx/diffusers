@@ -115,11 +115,10 @@ class KarrasDenoiser():
         t = torch.linspace(t_max, 0, n, device=self.sigmas.device)
         return append_zero(self.t_to_sigma(t))
 
-    def sigma_to_t(self, sigma, quantize=None):
-        quantize = self.quantize if quantize is None else quantize
+    def sigma_to_t(self, sigma):
         log_sigma = sigma.log()
         dists = log_sigma - self.log_sigmas[:, None]
-        if quantize:
+        if self.quantize:
             return dists.abs().argmin(dim=0).view(sigma.shape)
         low_idx = dists.ge(0).cumsum(dim=0).argmax(dim=0).clamp(max=self.log_sigmas.shape[0] - 2)
         high_idx = low_idx + 1
@@ -177,19 +176,22 @@ class KarrasCFGDenoiser():
         return getattr(self.denoiser, name)
 
     def __call__(self, xt, sigma, **kwargs):
-        x_in = torch.cat([xt, xt])
-        sigma_in = torch.cat([sigma, sigma])
+        # x_in = torch.cat([xt, xt])
+        # sigma_in = torch.cat([sigma, sigma])
         cond_pos_prompt = kwargs.pop('cond_pos_prompt')
         cond_neg_prompt = kwargs.pop('cond_neg_prompt')
-        kwargs['cond_prompt'] = torch.cat([cond_pos_prompt, cond_neg_prompt])
-        if 'cond_imaging' in kwargs:
-            cond_imaging = kwargs.pop('cond_imaging')
-            kwargs['cond_imaging'] = torch.cat([cond_imaging, cond_imaging])
+        # kwargs['cond_prompt'] = torch.cat([cond_pos_prompt, cond_neg_prompt])
+        # if 'cond_imaging' in kwargs:
+        #     cond_imaging = kwargs.pop('cond_imaging')
+        #     kwargs['cond_imaging'] = torch.cat([cond_imaging, cond_imaging])
 
-        x_out = self.denoiser(x_in, sigma_in, **kwargs)
+        # x_out = self.denoiser(x_in, sigma_in, **kwargs)
 
-        denoised_pos = x_out[:cond_pos_prompt.shape[0]]
-        denoised_neg = x_out[-cond_neg_prompt.shape[0]:]
+        # denoised_pos = x_out[:cond_pos_prompt.shape[0]]
+        # denoised_neg = x_out[-cond_neg_prompt.shape[0]:]
+        denoised_pos = self.denoiser(xt, sigma, cond_prompt=cond_pos_prompt, **kwargs)
+        denoised_neg = self.denoiser(xt, sigma, cond_prompt=cond_neg_prompt, **kwargs)
+        
         denoised = denoised_neg + self.cfg_scale * (denoised_pos - denoised_neg)
 
         return denoised
