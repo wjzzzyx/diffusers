@@ -12,7 +12,7 @@ class DDIMSampler():
         beta_start: float,
         beta_end: float,
         beta_schedule: str,
-        eta: float,
+        eta: float = 0.,
     ):
         """
         Args: 
@@ -33,15 +33,15 @@ class DDIMSampler():
         self.timesteps = range(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
         self.timesteps = self.timesteps[::-1]
     
-    def step(self, output: Dict[str, torch.Tensor], t: int, generator=None):
+    def step(self, denoised: torch.Tensor, xt: torch.Tensor, t: int, generator=None):
         t_next = t - self.num_train_steps // self.num_inference_steps
         alpha_cumprod_t = self.alphas_cumprod[t]
-        alpha_cumprod_t_next = self.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(1.0, device=output['epsilon'].device)
+        alpha_cumprod_t_next = self.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(1.0, device=xt.device)
         sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / alpha_cumprod_t_next)
         
-        pred_x0 = output['sample']
+        pred_x0 = denoised
         pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
-        pred_z = output['epsilon']
+        pred_z = (xt - torch.sqrt(alpha_cumprod_t) * denoised) / torch.sqrt(1 - alpha_cumprod_t)
 
         cur_mean = torch.sqrt(alpha_cumprod_t_next) * pred_x0 + torch.sqrt(1 - alpha_cumprod_t_next - sigma_t ** 2) * pred_z
 
@@ -53,40 +53,36 @@ class DDIMSampler():
         
         return sample_next
     
+    @torch.no_grad()
     def sample(
         self,
-        model,
-        batch_size: int = None,
-        image_shape: Sequence = None,
+        denoiser,
+        batch_size: int,
+        image_shape: Sequence,
+        denoiser_args: dict,
         image: torch.Tensor = None,
-        cond_pos_prompt: torch.Tensor = None,
-        cond_neg_prompt: torch.Tensor = None,
         generator=None
     ) -> torch.Tensor:
         """
         Args:
+            denoiser: takes charge of one step denoising, return denoised image
             image: initial noised image (e.g. from inverse sampling)
         """
         if image is None:
-            image = torch.randn((batch_size, *image_shape), generator=generator, device=model.device)
-
-        extra_args = dict()
-        if cond_pos_prompt is not None:
-            extra_args['cond_pos_prompt'] = cond_pos_prompt
-        if cond_neg_prompt is not None:
-            extra_args['cond_neg_prompt'] = cond_neg_prompt
+            image = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
         
         for t in self.timesteps:
-            output = model(image, t, **extra_args)
-            if model.prediction_type == 'epsilon':
-                epsilon = output
-                sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
-            elif model.prediction_type == 'sample':
-                sample = output
-                epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
-            elif model.prediction_type == 'v_prediction':
-                raise NotImplementedError('v_prediction is not implemented for DDPM.')
-            image = self.step({'sample': sample, 'epsilon': epsilon}, t, generator=generator)
+            time_t = torch.full((batch_size,), t, dtype=torch.int64, device=image.device)
+            denoised = denoiser(image, time_t, **denoiser_args)
+            # if model.prediction_type == 'epsilon':
+            #     epsilon = output
+            #     sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
+            # elif model.prediction_type == 'sample':
+            #     sample = output
+            #     epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
+            # elif model.prediction_type == 'v_prediction':
+            #     raise NotImplementedError('v_prediction is not implemented for DDPM.')
+            image = self.step(denoised, image, t, generator=generator)
         return image
 
 
