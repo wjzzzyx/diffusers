@@ -65,14 +65,21 @@ class DPMSampler():
         self,
         denoiser,
         batch_size: int,
-        image_shape: Sequence,
-        denoiser_args: dict,
+        image_shape: Sequence = None,
+        image: torch.Tensor = None,
+        denoiser_args: dict = {},
         generator = None
     ) -> torch.Tensor:
+        t_enc = min(int(self.denoising_strength * self.num_inference_steps), self.num_inference_steps - 1)
         sigmas = self.get_sigmas(denoiser).to(denoiser.inner_model.device)
+        sigmas = sigmas[self.num_inference_steps - t_enc - 1:]
 
-        noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
-        xi = noise * sigmas[0]
+        if image is not None:
+            noise = torch.randn(image.shape, device=image.device, generator=generator)
+            xi = image + noise * sigmas[0]
+        else:
+            noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
+            xi = noise * sigmas[0]
 
         if self.sampler == 'dpmpp_2m':
             sample = k_diffusion.sampling.sample_dpmpp_2m(
@@ -107,13 +114,13 @@ class DPMSampler():
         elif self.sampler == 'dpm_fast':
             # is eta correct?
             sample = k_diffusion.sampling.sample_dpm_fast(
-                denoiser, xi, sigma_min=denoiser.sigmas[0].item(), sigma_max=denoiser.sigmas[-1].item(), n=self.num_inference_steps,
+                denoiser, xi, sigma_min=sigmas[-2].item(), sigma_max=sigmas[0].item(), n=len(sigmas) - 1,
                 eta=1., s_noise=1., extra_args=denoiser_args
             )
         elif self.sampler == 'dpm_adaptive':
             # is eta correct?
             sample = k_diffusion.sampling.sample_dpm_adaptive(
-                denoiser, xi, sigma_min=denoiser.sigmas[0].item(), sigma_max=denoiser.sigmas[-1].item(), eta=1., extra_args=denoiser_args
+                denoiser, xi, sigma_min=sigmas[-2].item(), sigma_max=sigmas[0].item(), eta=1., extra_args=denoiser_args
             )
         
         return sample
