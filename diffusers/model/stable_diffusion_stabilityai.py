@@ -1202,6 +1202,16 @@ class StableDiffusion_StabilityAI(nn.Module):
             c = self.cond_stage_model(cond)
         return c
     
+    def encode_first_stage(self, x):
+        encoder_posterior = self.first_stage_model.encode(x)
+        if isinstance(encoder_posterior, DiagonalGaussianDistribution):
+            z = encoder_posterior.sample()
+        elif isinstance(encoder_posterior, torch.Tensor):
+            z = encoder_posterior
+        else:
+            raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
+        return self.scale_factor * z
+    
     def decode_first_stage(self, z):
         z = 1. / self.scale_factor * z
         return self.first_stage_model.decode(z)
