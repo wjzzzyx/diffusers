@@ -3,6 +3,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 import safetensors
 import torch
+import torchvision.transforms.v2.functional as TF
 
 from diffusers.sampler.denoiser import DiscreteTimeEpsDenoiser, DiscreteTimeCFGDenoiser
 from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
@@ -33,7 +34,21 @@ cond_pos_prompt = sd_model.get_learned_conditioning(cond_pos_prompt)
 cond_neg_prompt = sd_model.get_learned_conditioning(cond_neg_prompt)
 
 denoiser_args = {'cond_pos_prompt': cond_pos_prompt, 'cond_neg_prompt': cond_neg_prompt}
-samples = sampler.sample(denoiser, batch_size=1, image_shape=(4, 64, 64), denoiser_args=denoiser_args)
+
+def txt2img():
+    samples = sampler.sample(denoiser, batch_size=1, image_shape=(4, 64, 64), denoiser_args=denoiser_args)
+    return samples
+
+
+def img2img(image):
+    image = TF.pil_to_tensor(image)
+    
+    z = sd_model.encode_first_stage(image)
+
+    samples = sampler.sample(denoiser, batch_size=1, image=z, denoiser_args=denoiser_args)
+    return samples
+
+samples = txt2img()
 
 samples = sd_model.decode_first_stage(samples)
 samples = torch.clamp((samples + 1) / 2, min=0, max=1)
