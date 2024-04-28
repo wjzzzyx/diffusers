@@ -41,17 +41,27 @@ class DPMSampler():
         self.initial_noise_multiplier = initial_noise_multiplier
         self.denoising_strength = denoising_strength
 
+        self.sigmas = torch.sqrt((1 - self.alphas_cumprod) / self.alphas_cumprod)
+    
+    @property
+    def sigma_min(self):
+        return self.sigmas[0].item()
+
+    @property
+    def sigma_max(self):
+        return self.sigmas[-1].item()
+
     def get_sigmas(self, denoiser):
         steps = self.num_inference_steps + 1 if self.discard_next_to_last_sigma else self.num_inference_steps
 
         if self.scheduler == 'karras':
-            sigma_min, sigma_max = denoiser.sigmas[0].item(), denoiser.sigmas[-1].item()
-            sigmas = k_diffusion.sampling.get_sigmas_karras(n=steps, sigma_min=sigma_min, sigma_max=sigma_max)
+            sigmas = k_diffusion.sampling.get_sigmas_karras(n=steps, sigma_min=self.sigma_min, sigma_max=self.sigma_max)
         elif self.scheduler == 'exponential':
-            sigma_min, sigma_max = denoiser.sigmas[0].item(), denoiser.sigmas[-1].item()
-            sigmas = k_diffusion.sampling.get_sigmas_exponential(n=steps, sigma_min=sigma_min, sigma_max=sigma_max)
+            sigmas = k_diffusion.sampling.get_sigmas_exponential(n=steps, sigma_min=self.sigma_min, sigma_max=self.sigma_max)
         else:
-            sigmas = denoiser.get_sigmas(steps)
+            t_max = len(self.sigmas) - 1
+            t = torch.linspace(t_max, 0, steps, device=self.sigmas.device)
+            sigmas = torch.cat([denoiser.t_to_sigma(t), t.new_zeros([1])])
         
         if self.discard_next_to_last_sigma:
             sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
