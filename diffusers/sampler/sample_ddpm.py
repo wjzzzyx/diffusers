@@ -13,17 +13,18 @@ class DDPMSampler():
         beta_start: float,
         beta_end: float,
         beta_schedule: str,
+        denoising_strength: float = 1.0,
     ):
         self.num_train_steps = num_train_steps
         self.num_inference_steps = num_inference_steps
         self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.denoising_strength = denoising_strength
 
         self.set_timesteps(num_inference_steps)
     
-    def set_timesteps(self, num_inference_steps: int):
-        self.num_inference_steps = num_inference_steps
+    def set_timesteps(self):
         # leading spaceing
         self.timesteps = range(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
         self.timesteps = self.timesteps[::-1]
@@ -64,19 +65,27 @@ class DDPMSampler():
         self,
         denoiser,
         batch_size: int,
-        image_shape: Sequence,
-        denoiser_args: dict,
+        image_shape: Sequence = None,
+        image: torch.Tensor = None,
+        denoiser_args: dict = {},
         generator=None
     ):
         """
         Args:
             denoiser: takes charge of one step denoising, return denoised image
         """
-        image = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
+        num_steps = int(round(self.num_inference_steps * self.denoising))
+        denoising_t = self.timesteps[-num_steps]
+        timesteps = self.timesteps[-num_steps:]
+        noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
+        if image is None:
+            x = noise
+        else:
+            x = torch.sqrt(self.alphas_cumprod[denoising_t]) * image + torch.sqrt(1 - self.alphas_cumprod[t]) * noise
 
-        for t in self.timesteps:
+        for t in timesteps:
             time_t = torch.full((batch_size,), t, dtype=torch.int64, device=image.device)
-            denoised = denoiser(image, time_t, **denoiser_args)
+            denoised = denoiser(x, time_t, **denoiser_args)
             # if model.prediction_type == 'epsilon':
             #     epsilon = output
             #     sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
@@ -85,8 +94,8 @@ class DDPMSampler():
             #     epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
             # elif model.prediction_type == 'v_prediction':
             #     raise NotImplementedError('v_prediction is not implemented for DDPM.')
-            image = self.step(denoised, t, image, generator=generator)
-        return image
+            x = self.step(denoised, t, image, generator=generator)
+        return x
 
 
 def dynamic_threshold(sample: torch.Tensor):
