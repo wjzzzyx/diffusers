@@ -6,7 +6,7 @@ class DiscreteTimeEpsDenoiser():
     # from stable-diffusion-webui
     def __init__(self, model, alphas_cumprod):
         self.inner_model = model
-        self.alphas_cumprod = alphas_cumprod
+        self.alphas_cumprod = alphas_cumprod.to(model.device)
     
     def __call__(self, xt, t, **kwargs):
         # xt: shape (b, c, h, w)
@@ -138,7 +138,7 @@ class KarrasDenoiser():
 class KarrasEpsDenoiser(KarrasDenoiser):
     """A wrapper for my StabilityAI diffusion models."""
     def __init__(self, model, alphas_cumprod):
-        super().__init__(alphas_cumprod, quantize=False)
+        super().__init__(alphas_cumprod.to(model.device), quantize=False)
         self.inner_model = model
         self.sigma_data = 1.
 
@@ -153,7 +153,7 @@ class KarrasEpsDenoiser(KarrasDenoiser):
 
 class KarrasVDenoiser(KarrasDenoiser):
     def __init__(self, model, alphas_cumprod):
-        super().__init__(alphas_cumprod, quantize=False)
+        super().__init__(alphas_cumprod.to(model.device), quantize=False)
         self.inner_model = model
         self.sigma_data = 1.
     
