@@ -57,8 +57,9 @@ except:
 
 from diffusers.model.stable_diffusion_stabilityai import (
     TimestepBlock, conv_nd, Upsample, Downsample, zero_module, AttentionBlock, timestep_embedding,
-    TimestepEmbedSequential, FeedForward
+    TimestepEmbedSequential, FeedForward, SpatialTransformer
 )
+from diffusers.model.vae import DiagonalGaussianDistribution
 import torch_utils
 import utils
 

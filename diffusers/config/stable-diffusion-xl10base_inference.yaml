@@ -32,7 +32,7 @@ model:
               target: diffusers.model.text_encoder.CLIPTextEncoder
               params:
                 layer: hidden
-                layer_idx: -1
+                layer_idx: -2
             
             - is_trainable: False
               input_key: txt

@@ -314,7 +314,7 @@ class OpenCLIPTextEncoderPooled(OpenCLIPTextEncoder):
             if i_block == self.layer_idx:
                 out = x
         out = out.permute(1, 0, 2)
-        out = self.model.ln_final(out)    # should we normalize this?
+        # out = self.model.ln_final(out)    # should we normalize this?
         x = x.permute(1, 0, 2)
         x = self.model.ln_final(x)
         return out, x

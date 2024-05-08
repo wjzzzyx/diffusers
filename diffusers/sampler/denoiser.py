@@ -99,11 +99,11 @@ class KarrasDenoiser():
     
     @property
     def sigma_min(self):
-        return self.sigmas[0]
+        return self.sigmas[0].item()
 
     @property
     def sigma_max(self):
-        return self.sigmas[-1]
+        return self.sigmas[-1].item()
 
     def get_sigmas(self, n=None):
         def append_zero(x):
