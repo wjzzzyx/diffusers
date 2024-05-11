@@ -1,0 +1,84 @@
+model:
+  target: diffusers.model.stable_diffusion_xl.StableDiffusionXL_CondEmb
+  params:
+    model_config:
+      prediction_type: epsilon
+      scale_factor: 0.13025
+
+      network_config:
+        target: diffusers.model.stable_diffusion_xl.UNetModel
+        params:
+          adm_in_channels: 2560
+          num_classes: sequential
+          use_checkpoint: True
+          in_channels: 4
+          out_channels: 4
+          model_channels: 384
+          attention_resolutions: [4, 2]
+          num_res_blocks: 2
+          channel_mult: [1, 2, 4, 4]
+          num_head_channels: 64
+          use_linear_in_transformer: True
+          transformer_depth: 4
+          context_dim: [1280, 1280, 1280, 1280]
+          spatial_transformer_attn_type: softmax-xformers
+      
+      conditioner_config:
+        target: diffusers.model.stable_diffusion_xl.GeneralConditioner
+        params:
+          emb_models:
+            - is_trainable: False
+              input_key: txt
+              target: diffusers.model.text_encoder.OpenCLIPTextEncoderPooled
+              params:
+                arch: ViT-bigG-14
+                version: laion2b_s39b_b160k
+                layer: hidden
+                layer_idx: -2
+
+            - is_trainable: False
+              input_key: original_size_as_tuple
+              target: diffusers.model.stable_diffusion_xl.ConcatTimestepEmbedderND
+              params:
+                outdim: 256
+
+            - is_trainable: False
+              input_key: crop_coords_top_left
+              target: diffusers.model.stable_diffusion_xl.ConcatTimestepEmbedderND
+              params:
+                outdim: 256
+
+            - is_trainable: False
+              input_key: aesthetic_score
+              target: diffusers.model.stable_diffusion_xl.ConcatTimestepEmbedderND
+              params:
+                outdim: 256
+
+      first_stage_config:
+        target: diffusers.model.vae.AutoEncoderKL
+        params:
+          in_channels: 3
+          base_channels: 128
+          out_channels: 3
+          z_channels: 4
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+          attn_type: vanilla-xformers
+
+sampler:
+  target: diffusers.sampler.sample_dpm.DPMSampler
+  params:
+    sampler: dpmpp_2m
+    scheduler: karras
+    solver_type: none
+    discard_next_to_last_sigma: False
+    second_order: False
+    uses_ensd: False
+    num_train_steps: 1000
+    num_inference_steps: 20
+    beta_start: 0.00085
+    beta_end: 0.012
+    beta_schedule: sqrt_linear
+    denoising_strength: 0.5
