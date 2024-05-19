@@ -42,12 +42,16 @@ def txt2img():
 
 def img2img(image):
     image = TF.pil_to_tensor(image)
+    image = image.float() / 255
+    image = image * 2 - 1
+    image = image.to(sd_model.device)
     
     z = sd_model.encode_first_stage(image)
 
     samples = sampler.sample(denoiser, batch_size=1, image=z, denoiser_args=denoiser_args)
     return samples
 
+image = Image.open()
 samples = txt2img()
 
 samples = sd_model.decode_first_stage(samples)

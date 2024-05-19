@@ -337,7 +337,9 @@ class SpatialTransformer(nn.Module):
             f"constructing {self.__class__.__name__} of depth {depth} w/ "
             f"{in_channels} channels and {n_heads} heads."
         )
-
+        from omegaconf.listconfig import ListConfig
+        if type(context_dim) == ListConfig:
+            context_dim = list(context_dim)
         if context_dim is not None and not isinstance(context_dim, list):
             context_dim = [context_dim]
         if context_dim is not None and isinstance(context_dim, list):

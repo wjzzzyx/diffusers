@@ -42,7 +42,7 @@ cond_neg_prompt = sd_model.get_learned_conditioning(cond_neg_prompt)
 lowres_image = Image.open().convert('RGB')
 lowres_image = TF.pil_to_tensor(lowres_image)
 lowres_image = lowres_image.unsqueeze(0).cuda()
-noise_level = torch.tensor([20]).cuda()
+noise_level = torch.tensor([0]).cuda()
 noise = torch.randn(lowres_image.size()).cuda()
 lowres_aug = sqrt_alphas_cumprod[noise_level] * lowres_image + sqrt_one_minus_alphas_cumprod[noise_level] * noise
 

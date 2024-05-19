@@ -24,9 +24,9 @@ sampler = utils.instantiate_from_config(config.sampler)
 
 alphas_cumprod = sampler.alphas_cumprod
 if sd_model.prediction_type == 'epsilon':
-    denoiser = KarrasEpsDenoiser(sd_model, alphas_cumprod.cuda())
+    denoiser = KarrasEpsDenoiser(sd_model, alphas_cumprod)
 elif sd_model.prediction_type == 'v':
-    denoiser = KarrasVDenoiser(sd_model, alphas_cumprod.cuda())
+    denoiser = KarrasVDenoiser(sd_model, alphas_cumprod)
 denoiser = KarrasCFGDenoiser(denoiser, 7)
 
 cond_pos_prompt = ['']
@@ -50,6 +50,10 @@ def txt2img():
 def img2img(image):
     width, height = image.size
     image = TF.pil_to_tensor(image)
+    image = image.float() / 255
+    image = image * 2 - 1
+    image = image.to(sd_model.device)
+    image = image.unsqueeze(0)
 
     original_size_as_tuple = torch.tensor([[height, width]]).cuda()
     crop_coords_top_left = torch.tensor([[0, 0]]).cuda()
@@ -58,7 +62,7 @@ def img2img(image):
 
     batch = {'txt': cond_pos_prompt, 'original_size_as_tuple': original_size_as_tuple, 'crop_coords_top_left': crop_coords_top_left, 'aesthetic_score': aesthetic_score}
     batch_uc = {'txt': cond_neg_prompt, 'original_size_as_tuple': original_size_as_tuple, 'crop_coords_top_left': crop_coords_top_left, 'negative_aesthetic_score': negative_aesthetic_score}
-
+    
     c, uc = sd_model.conditioner.get_unconditional_conditioning(batch, batch_uc)
     z = sd_model.encode_first_stage(image)
     
@@ -70,7 +74,10 @@ def img2img(image):
     samples = sampler.sample(denoiser, batch_size=1, image=z, denoiser_args=denoiser_args)
     return samples
 
-samples = txt2img()
+# samples = txt2img()
+image = Image.open()
+samples = img2img(image)
+
 samples = sd_model.decode_first_stage(samples)
 samples = torch.clamp((samples + 1) / 2, min=0, max=1)
 samples_np = samples.detach().squeeze(0).cpu().numpy()
