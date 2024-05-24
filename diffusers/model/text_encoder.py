@@ -346,6 +346,7 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
             assert(min(token_ids) == token_ids[0])
             assert(token_ids[-1] == token_ids[0] + len(token_ids) - 1)
             assert(len(self.tokenizer) - 1 == token_ids[-1])
+        self.original_token_embedding = self.transformer.text_model.embeddings.token_embedding.clone()
         self.transformer.resize_token_embeddings(len(self.tokenizer))
         # TODO initialize new embeddings
         # TODO load pretrained new embeddings
@@ -390,6 +391,19 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
         text_embs = text_embs * (original_mean / new_mean)[:, None, None]
 
         return text_embs
+    
+    def freeze_original_embedding(self):
+        with torch.no_grad():
+            self.transformer.text_model.embeddings.token_embedding.weight[:self.original_num_tokens] = self.original_token_embedding
+
+    def get_ti_embedding(self, state_dict):
+        token_embedding_weight = state_dict['cond_stage_model.transformer.text_model.embeddings.token_embedding.weight']
+        ti_embedding_weight = token_embedding_weight[-self.original_num_tokens]
+        ti_embeddings_dict = dict()
+        i = 0
+        for name, num_token in self.ti_name2numtoken:
+            ti_embeddings_dict[name] = ti_embedding_weight[i:i + num_token]
+        return ti_embeddings_dict
 
     # def get_tokens(self, texts_with_weights):
     #     batch_tokens = list()

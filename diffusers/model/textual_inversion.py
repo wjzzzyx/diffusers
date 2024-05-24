@@ -8,7 +8,7 @@ from diffusers.model.vae import DiagonalGaussianDistribution
 
 
 class StableDiffusion_TextualInversion(nn.Module):
-    """A custom version of StabilityAI Stable Diffusion Model"""
+    """A custom version of Stable Diffusion Textual Inversion Model"""
     def __init__(self, model_config):
         super().__init__()
         self.prediction_type = model_config.prediction_type
@@ -107,7 +107,7 @@ class PLTextualInversion(lightning.LightningModule):
         self.model.cond_stage_model.freeze_original_embedding()
     
     def on_save_checkpoint(self, checkpoint):
-        ti_embeds_dict = self.model.cond_stage_model.get_ti_embeds(checkpoint['state_dict'])
+        ti_embeds_dict = self.model.cond_stage_model.get_ti_embedding(checkpoint['state_dict'])
         checkpoint['state_dict'] = ti_embeds_dict
     
     def configure_optimizers(self):

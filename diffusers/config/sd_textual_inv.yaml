@@ -1,0 +1,101 @@
+model:
+  target: diffusers.model.textual_inversion.StableDiffusion_TextualInversion
+  params:
+    model_config:
+      prediction_type: epsilon
+      scale_factor: 0.18215
+      first_stage_config:
+        target: diffusers.model.vae.AutoEncoderKL
+        params:
+          in_channels: 3
+          base_channels: 128
+          out_channels: 3
+          z_channels: 4
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+      cond_stage_config:
+        target: diffusers.model.text_encoder.CLIPTextEncoder_TextualInversion
+        params:
+          ti_names: <>
+          ti_num_tokens_per_name: [4]
+      unet_config:
+        target: diffusers.model.stable_diffusion_stabilityai.UNetModel
+        params:
+          image_size: 32 # unused
+          in_channels: 4
+          out_channels: 4
+          model_channels: 320
+          attention_resolutions: [4, 2, 1]
+          num_res_blocks: 2
+          channel_mult: [1, 2, 4, 4]
+          num_heads: 8
+          use_spatial_transformer: True
+          transformer_depth: 1
+          context_dim: 768
+          use_checkpoint: True
+          legacy: False
+    
+    loss_config:
+      target: diffusers.loss.diffusion_loss.DiffusionLoss
+      params:
+        loss_type: l2
+
+    optimizer_config:
+      optimizer: torch.optim.AdamW
+      optimizer_params:
+        lr: 1.0e-6
+      lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+      lr_scheduler_params:
+        T_max: 1000
+      warmup: 10
+
+    sampler_config:
+      target: diffusers.sampler.sample_dpm.DPMSampler
+      params:
+        sampler: dpmpp_2m
+        scheduler: karras
+        solver_type: none
+        discard_next_to_last_sigma: False
+        second_order: False
+        uses_ensd: False
+        num_train_steps: 1000
+        num_inference_steps: 20
+        beta_start: 0.00085
+        beta_end: 0.012
+        beta_schedule: sqrt_linear
+
+data:
+  batch_size: 4
+  num_workers: 4
+  train:
+    target: diffusers.data.template_caption_dataset.TemplateCaptionDataset
+    params:
+      image_dir:
+      ti_name:
+  val:
+    target: diffusers.data.null_image.dataset.NullImageDataset
+    params:
+      len: 10
+
+lightning:
+  callbacks:
+    checkpoint_callback:
+      params:
+        # monitor: 'val/loss'
+        save_top_k: -1
+        # mode: min
+        every_n_epochs: 50
+  
+  trainer:
+    accelerator: gpu
+    devices: 8
+    benchmark: True
+    accumulate_grad_batches: 1
+    max_steps: 1000
+    gradient_clip_val: 1.0
+    # precision: '16'
+    profiler: simple
+    # limit_train_batches: 100
+    # limit_val_batches: 10
