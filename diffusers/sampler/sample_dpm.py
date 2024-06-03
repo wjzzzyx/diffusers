@@ -34,6 +34,7 @@ class DPMSampler():
         self.discard_next_to_last_sigma = discard_next_to_last_sigma
         self.second_order = second_order
         self.uses_ensd = uses_ensd
+        self.num_train_steps = num_train_steps
         self.num_inference_steps = num_inference_steps
         self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
         self.alphas = 1.0 - self.betas

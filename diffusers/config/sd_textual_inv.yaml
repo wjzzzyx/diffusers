@@ -1,9 +1,13 @@
+exp_name: debug
+
 model:
-  target: diffusers.model.textual_inversion.StableDiffusion_TextualInversion
+  seed: 42
+  target: diffusers.model.textual_inversion.PLTextualInversion
   params:
     model_config:
       prediction_type: epsilon
       scale_factor: 0.18215
+      pretrained:
       first_stage_config:
         target: diffusers.model.vae.AutoEncoderKL
         params:
@@ -18,7 +22,7 @@ model:
       cond_stage_config:
         target: diffusers.model.text_encoder.CLIPTextEncoder_TextualInversion
         params:
-          ti_names: <>
+          ti_names: [<>]
           ti_num_tokens_per_name: [4]
       unet_config:
         target: diffusers.model.stable_diffusion_stabilityai.UNetModel
@@ -41,14 +45,15 @@ model:
       target: diffusers.loss.diffusion_loss.DiffusionLoss
       params:
         loss_type: l2
+        prediction_type: epsilon
 
     optimizer_config:
       optimizer: torch.optim.AdamW
       optimizer_params:
-        lr: 1.0e-6
+        lr: 1.0e-2
       lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
       lr_scheduler_params:
-        T_max: 1000
+        T_max: 10000
       warmup: 10
 
     sampler_config:
@@ -68,16 +73,20 @@ model:
 
 data:
   batch_size: 4
+  val_batch_size: 4
   num_workers: 4
   train:
     target: diffusers.data.template_caption_dataset.TemplateCaptionDataset
     params:
       image_dir:
       ti_name:
+      mode: train
   val:
-    target: diffusers.data.null_image.dataset.NullImageDataset
+    target: diffusers.data.template_caption_dataset.TemplateCaptionDataset
     params:
-      len: 10
+      image_dir:
+      ti_name:
+      mode: val
 
 lightning:
   callbacks:
@@ -90,11 +99,12 @@ lightning:
   
   trainer:
     accelerator: gpu
-    devices: 8
+    devices: 1
     benchmark: True
     accumulate_grad_batches: 1
-    max_steps: 1000
+    max_steps: 10000
     gradient_clip_val: 1.0
+    check_val_every_n_epoch: 10
     # precision: '16'
     profiler: simple
     # limit_train_batches: 100

@@ -10,6 +10,7 @@ class DiffusionLoss(nn.Module):
         min_snr_gamma = 0, scale_v_pred_loss_like_noise_pred = False, v_pred_like_loss = 0,
         debiased_estimation_loss = False
     ):
+        super().__init__()
         self.loss_type = loss_type
         self.prediction_type = prediction_type
         self.base_huber_c = base_huber_c
@@ -18,7 +19,8 @@ class DiffusionLoss(nn.Module):
         self.v_pred_like_loss = v_pred_like_loss
         self.debiased_estimation_loss = debiased_estimation_loss
     
-    def forward(self, pred, target, batch, time):
+    def forward(self, pred, target, batch):
+        time = batch['time']
         if self.loss_type == 'l2':
             loss = F.mse_loss(pred, target, reduction='none')
         elif self.loss_type == 'huber':
@@ -60,7 +62,8 @@ class DiffusionLoss(nn.Module):
             loss = loss * weight
         
         loss = loss.mean()
-        return loss
+        logdict = {f'loss_{self.loss_type}': loss.item()}
+        return loss, logdict
         
     def get_timestep_huber_c(self, batch, time):
         if self.huber_schedule == 'exponential':

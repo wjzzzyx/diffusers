@@ -58,14 +58,16 @@ class TemplateCaptionDataset(torch.utils.data.Dataset):
         "a large painting in the style of {}",
     ]
 
-    def __init__(self, image_dir, ti_name):
+    def __init__(self, image_dir, ti_name, mode):
         " "
         self.image_dir = image_dir
         self.fnames = os.listdir(image_dir)
         self.ti_name = ti_name
+        self.mode = mode
 
         self.transform = T.Compose([
             T.ToTensor(),
+            T.Resize((512, 512)),
             T.Normalize([0.5], [0.5])
         ])
     
@@ -73,11 +75,12 @@ class TemplateCaptionDataset(torch.utils.data.Dataset):
         return len(self.fnames)
     
     def __getitem__(self, index):
-        fname = self.fnames[index]
-        image = Image.open(os.path.join(self.image_dir, fname))
-        image = self.transform(image)
+        feeddict = dict()
+        if self.mode == 'train':
+            fname = self.fnames[index]
+            image = Image.open(os.path.join(self.image_dir, fname))
+            image = self.transform(image)
+            feeddict['images'] = image
         caption = random.choice(self.object_templates_small).format(self.ti_name)
-        return {
-            'image': image,
-            'caption': caption
-        }
+        feeddict['captions'] = caption
+        return feeddict

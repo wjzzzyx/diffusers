@@ -580,9 +580,13 @@ class ResBlock(TimestepBlock):
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        return torch_utils.checkpoint(
-            self._forward, (x, emb), self.parameters(), self.use_checkpoint
-        )
+        # return torch_utils.checkpoint(
+        #     self._forward, (x, emb), self.parameters(), self.use_checkpoint
+        # )
+        if self.use_checkpoint:
+            return checkpoint(self._forward, x, emb)
+        else:
+            return self._forward(x, emb)
 
     def _forward(self, x, emb):
         if self.updown:

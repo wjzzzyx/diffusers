@@ -1,10 +1,15 @@
 import lightning
+import numpy as np
+import os
+from PIL import Image
 import torch
 import torch.nn as nn
 
 import utils
 from diffusers.model import ema
 from diffusers.model.vae import DiagonalGaussianDistribution
+from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
+from torch_utils import replace_substring_in_state_dict_if_present
 
 
 class StableDiffusion_TextualInversion(nn.Module):
@@ -15,7 +20,6 @@ class StableDiffusion_TextualInversion(nn.Module):
         self.scale_factor = model_config.scale_factor
 
         self.first_stage_model = utils.instantiate_from_config(model_config.first_stage_config)
-        # support additional tokens and embeddings
         self.cond_stage_model = utils.instantiate_from_config(model_config.cond_stage_config)
         self.diffusion_model = utils.instantiate_from_config(model_config.unet_config)
 
@@ -24,6 +28,15 @@ class StableDiffusion_TextualInversion(nn.Module):
         self.first_stage_model.requires_grad_(False)
         self.diffusion_model.eval()
         self.diffusion_model.requires_grad_(False)
+
+        if 'pretrained' in model_config:
+            checkpoint = torch.load(model_config.pretrained, map_location='cpu')
+            state_dict = checkpoint['state_dict']
+            replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+        
+        # support additional tokens and embeddings
+        self.cond_stage_model.expand_vocab()
     
     @property
     def device(self):
@@ -35,19 +48,24 @@ class StableDiffusion_TextualInversion(nn.Module):
     def forward(self, batch):
         batch_size = batch['images'].size(0)
         latents = self.encode_first_stage(batch['images'])
-        cond_prompt = self.cond_stage_model(batch['texts'])
+        cond_prompt = self.cond_stage_model(batch['captions'])
  
         noise = torch.randn_like(latents)
         time = torch.randint(0, batch['num_train_timesteps'], (batch_size,), device=self.device)
+        batch['time'] = time
         # TODO noise offset
         alphas_cumprod_t = batch['alphas_cumprod'][time][(...,) + (None,) * 3]    # shape (b, 1, 1, 1)
-        xt = torch.sqrt(alphas_cumprod_t) * batch['image'] + torch.sqrt(1 - alphas_cumprod_t) * noise
+        xt = torch.sqrt(alphas_cumprod_t) * latents + torch.sqrt(1 - alphas_cumprod_t) * noise
         output = self.diffusion_model(xt, time, cond_prompt)
 
         # TODO v prediction
         target = noise
 
-        return output, target
+        return output, target, xt
+    
+    def forward_diffusion_model(self, xt, t, cond_prompt):
+        output = self.diffusion_model(xt, t, cond_prompt)
+        return output
     
     def encode_first_stage(self, x):
         encoder_posterior = self.first_stage_model.encode(x)
@@ -82,7 +100,7 @@ class PLTextualInversion(lightning.LightningModule):
         self.metric_config = metric_config
         self.ema_config = ema_config
 
-        self.model = utils.instantiate_from_config(model_config)
+        self.model = StableDiffusion_TextualInversion(model_config)
         self.loss_fn = utils.instantiate_from_config(loss_config)
         self.sampler = utils.instantiate_from_config(sampler_config)
         if self.ema_config:
@@ -97,14 +115,43 @@ class PLTextualInversion(lightning.LightningModule):
     
     def training_step(self, batch, batch_idx):
         batch['num_train_timesteps'] = self.sampler.num_train_steps
-        batch['alphas_cumprod'] = self.sampler.alphas_cumprod
-        output, target = self.model(batch)
-        loss, logdict = self.loss_fn(output, target)
+        batch['alphas_cumprod'] = self.sampler.alphas_cumprod.to(self.device)
+        output, target, xt = self.model(batch)
+        loss, logdict = self.loss_fn(output, target, batch)
+        logdict = {f'train/{k}': v for k, v in logdict.items()}
         self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch['image'])
+        
+        alphas_cumprod_t = batch['alphas_cumprod'][batch['time']][(...,) + (None,) * 3]    # shape: batch, 1, 1, 1
+        pred = (xt - torch.sqrt(1 - alphas_cumprod_t) * output) / torch.sqrt(alphas_cumprod_t)
+        pred = self.model.decode_first_stage(pred)
+        pred = (pred + 1) / 2
+        log_image_dict = {'image': (batch['image'] + 1) / 2, 'pred': pred}
+        self.log_image(log_image_dict, ['image', 'pred'], batch_idx, mode='train')
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.model.cond_stage_model.freeze_original_embedding()
+    
+    def validation_step(self, batch, batch_idx):
+        alphas_cumprod = self.sampler.alphas_cumprod.to(self.device)
+        if self.model.prediction_type == 'epsilon':
+            denoiser = KarrasEpsDenoiser(self.model, alphas_cumprod)
+        elif self.model.prediction_type == 'v':
+            denoiser = KarrasVDenoiser(self.model, alphas_cumprod)
+        denoiser = KarrasCFGDenoiser(denoiser, 7)
+
+        batch_size = len(batch['images'])
+        cond_pos_prompt = self.model.cond_stage_model(batch['captions'])
+        cond_neg_prompt = self.model.cond_stage_model(['' for _ in range(batch_size)])
+        denoiser_args = {'cond_pos_prompt': cond_pos_prompt, 'cond_neg_prompt': cond_neg_prompt}
+        samples = self.sampler.sample(
+            denoiser, batch_size=batch_size, image_shape=(4, 64, 64), denoiser_args=denoiser_args
+        )
+        samples = self.model.decode_first_stage(samples)
+        samples = torch.clamp((samples + 1) / 2, min=0, max=1)
+        log_image_dict = {'image': samples}
+        log_keys=['image']
+        self.log_image(log_image_dict, log_keys, batch_idx, mode='validation')
     
     def on_save_checkpoint(self, checkpoint):
         ti_embeds_dict = self.model.cond_stage_model.get_ti_embedding(checkpoint['state_dict'])
@@ -120,7 +167,7 @@ class PLTextualInversion(lightning.LightningModule):
         )
         if self.optimizer_config.warmup:
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-                optimizer, start_factor=0, total_iters=self.optimizer_config.warmup
+                optimizer, start_factor=0.1, total_iters=self.optimizer_config.warmup
             )
             lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
                 optimizer, [warmup_scheduler, lr_scheduler], milestones=[self.optimizer_config.warmup]
@@ -132,3 +179,19 @@ class PLTextualInversion(lightning.LightningModule):
                 'interval': 'step'
             }
         }
+    
+    @torch.no_grad()
+    def log_image(self, batch, keys, batch_idx, mode):
+        """
+        Args:
+            batch: dictionary, key: str -> value: tensor
+        """
+        dirname = os.path.join(self.trainer.default_root_dir, 'log_images', mode)
+        os.makedirs(dirname, exist_ok=True)
+        for key in keys:
+            image_t = batch[key].permute(0, 2, 3, 1).squeeze(-1)
+            image_np = image_t.detach().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            for i in range(image_np.shape[0]):
+                filename = f'gs-{self.global_step:04}_e-{self.current_epoch:04}_b-{batch_idx:04}-{i:02}_{key}.png'
+                Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))

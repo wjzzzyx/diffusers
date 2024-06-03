@@ -335,21 +335,7 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
         self.layer_idx = layer_idx
 
         self.original_num_tokens = len(self.tokenizer)
-        self.ti_name2index = {name: i + 1 for i, name in enumerate(ti_names)}
-        self.ti_index2name = {v: k for k, v in self.ti_name2index.items()}
         self.ti_name2numtoken = {name: num_token for name, num_token in zip(ti_names, ti_num_tokens_per_name)}
-        for name, num_tokens in zip(ti_names, ti_num_tokens_per_name):
-            name_repeats = [f'{name}{i}' for i in range(len(num_tokens))]
-            num_added_tokens = self.tokenizer.add_tokens(name_repeats)
-            assert(num_added_tokens == num_tokens)
-            token_ids = self.tokenizer.convert_tokens_to_ids(name_repeats)
-            assert(min(token_ids) == token_ids[0])
-            assert(token_ids[-1] == token_ids[0] + len(token_ids) - 1)
-            assert(len(self.tokenizer) - 1 == token_ids[-1])
-        self.original_token_embedding = self.transformer.text_model.embeddings.token_embedding.clone()
-        self.transformer.resize_token_embeddings(len(self.tokenizer))
-        # TODO initialize new embeddings
-        # TODO load pretrained new embeddings
         
         vocab = self.tokenizer.get_vocab()
         self.bos_token_id = self.tokenizer.bos_token_id
@@ -363,6 +349,20 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
         self.transformer.text_model.encoder.requires_grad_(False)
         self.transformer.text_model.final_layer_norm.requires_grad_(False)
         self.transformer.text_model.embeddings.position_embedding.requires_grad_(False)
+    
+    def expand_vocab(self):
+        for name, num_tokens in self.name2numtoken.items():
+            name_repeats = [f'{name}{i}' for i in range(len(num_tokens))]
+            num_added_tokens = self.tokenizer.add_tokens(name_repeats)
+            assert(num_added_tokens == num_tokens)
+            token_ids = self.tokenizer.convert_tokens_to_ids(name_repeats)
+            assert(min(token_ids) == token_ids[0])
+            assert(token_ids[-1] == token_ids[0] + len(token_ids) - 1)
+            assert(len(self.tokenizer) - 1 == token_ids[-1])
+        self.original_token_embedding = self.transformer.text_model.embeddings.token_embedding.clone()
+        self.transformer.resize_token_embeddings(len(self.tokenizer))
+        # TODO initialize new embeddings
+        # TODO load pretrained new embeddings
     
     @property
     def device(self):
@@ -392,145 +392,39 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
 
         return text_embs
     
+    def repeat_ti_names(self, texts):
+        for i in range(len(texts)):
+            text = texts[i]
+            for name, num_token in self.ti_name2numtoken.items():
+                if name in text:
+                    text = text.replace(name, ' '.join([f'{name}{j}' for j in range(num_token)]))
+            texts[i] = text
+        return texts
+    
+    def tokenize(self, text):
+        # text is a single string
+        return self.tokenizer(text, truncation=False, add_special_tokens=False).input_ids
+    
+    def encode_batch_tokens(self, batch_tokens):
+        batch_tokens = torch.asarray(batch_tokens, device=self.device)
+        outputs = self.transformer(input_ids=batch_tokens, output_hidden_states=(self.layer == 'hidden'))
+        if self.layer == 'hidden':
+            h = outputs.hidden_states[self.layer_idx]
+            h = self.transformer.text_model.final_layer_norm(h)
+        else:
+            h = outputs.last_hidden_state
+        return h
+    
     def freeze_original_embedding(self):
         with torch.no_grad():
             self.transformer.text_model.embeddings.token_embedding.weight[:self.original_num_tokens] = self.original_token_embedding
 
     def get_ti_embedding(self, state_dict):
-        token_embedding_weight = state_dict['cond_stage_model.transformer.text_model.embeddings.token_embedding.weight']
-        ti_embedding_weight = token_embedding_weight[-self.original_num_tokens]
+        token_embedding_weight = state_dict['model.cond_stage_model.transformer.text_model.embeddings.token_embedding.weight']
+        ti_embedding_weight = token_embedding_weight[self.original_num_tokens:]
         ti_embeddings_dict = dict()
         i = 0
-        for name, num_token in self.ti_name2numtoken:
+        for name, num_token in self.ti_name2numtoken.items():
             ti_embeddings_dict[name] = ti_embedding_weight[i:i + num_token]
+            i += num_token
         return ti_embeddings_dict
-
-    # def get_tokens(self, texts_with_weights):
-    #     batch_tokens = list()
-    #     batch_weights = list()
-    #     batch_ti_flags = list()
-    #     for text_with_weights in texts_with_weights:
-    #         tokens = list()
-    #         weights = list()
-    #         ti_flags = list()
-    #         for phrase, weight in text_with_weights:
-    #             phrase_tokens, phrase_flags = self.tokenize(phrase)
-    #             tokens.extend(phrase_tokens)
-    #             weights.extend([weight] * len(phrase_tokens))
-    #             ti_flags.extend(phrase_flags)
-    #         batch_tokens.append(tokens)
-    #         batch_weights.append(weights)
-    #         batch_ti_flags.append(ti_flags)
-    #     return batch_tokens, batch_weights, batch_ti_flags
-    
-    # def tokenize(self, text):
-    #     # text is a single string that may contain ti names
-    #     segments, segment_flags = self.parse_ti_names(text)
-    #     tokens = list()
-    #     ti_flags = list()
-    #     for segment, flag in zip(segments, segment_flags):
-    #         if flag == 0:
-    #             segment_tokens = self.tokenizer(segment, truncation=False, add_special_tokens=False).input_ids
-    #         else:
-    #             segment_tokens = list(range(self.ti_name2numtoken[self.ti_index2name[flag]]))
-    #         tokens.extend(segment_tokens)
-    #         ti_flags.extend([flag] * len(segment_tokens))
-            
-    #     return tokens, ti_flags
-    
-    # def parse_ti_names(self, string):
-    #     ti_names = [f'({name})' for name in self.ti_name2index.keys()]
-    #     pattern = re.compile(r'|'.join(ti_names))
-    #     matches = pattern.finditer(string)
-    #     segments = list()
-    #     ti_flags = list()
-    #     last = 0
-    #     for m in matches:
-    #         name = m.group(0).strip('()')
-    #         segments.append(string[last:m.start()])
-    #         ti_flags.append(0)
-    #         segments.append(name)
-    #         ti_flags.append(self.ti_name2index[name])
-    #         last = m.end()
-    #     segments.append(string[last:])
-    #     ti_flags.append(0)
-    #     return segments, ti_flags
-    
-    # def split_chunks(self, batch_tokens, batch_weights, batch_ti_flags):
-    #     batch_chunks = list()
-    #     batch_chunk_weights = list()
-    #     batch_chunk_flags = list()
-
-    #     for tokens, weights, ti_flags in zip(batch_tokens, batch_weights, batch_ti_flags):
-    #         chunks, chunk_weights, chunk_flags = self._split_chunks(tokens, weights, ti_flags)
-    #         batch_chunks.append(chunks)
-    #         batch_chunk_weights.append(chunk_weights)
-    #         batch_chunk_flags.append(chunk_flags)
-        
-    #     # ensure each sample in the batch has the same number of chunks
-    #     max_num_chunks = max([len(chunks) for chunks in batch_chunks])
-    #     empty_chunk = [self.bos_token_id] + [self.eos_token_id] * (self.model_max_length - 1)
-    #     empty_chunk_weight = [1.0] * self.model_max_length
-    #     empty_chunk_flag = [0] * self.model_max_length
-    #     for chunks, chunk_weights, chunk_flags in zip(batch_chunks, batch_chunk_weights, batch_chunk_flags):
-    #         while len(chunks) < max_num_chunks:
-    #             chunks.append(empty_chunk)
-    #             chunk_weights.append(empty_chunk_weight)
-    #             chunk_flags.append(empty_chunk_flag)
-        
-    #     return batch_chunks, batch_chunk_weights, batch_chunk_flags
-
-    # def _split_chunks(self, tokens, weights, ti_flags):
-    #     split_points = self._locate_split_points(tokens)
-    #     chunks = list()
-    #     chunk_weights = list()
-    #     chunk_flags = list()
-    #     last = 0
-
-    #     for p in split_points:
-    #         chunks.append(tokens[last:p+1])
-    #         chunk_weights.append(weights[last:p+1])
-    #         chunk_flags.append(ti_flags[last:p+1])
-    #         last = p + 1
-    #     chunks.append(tokens[last:])
-    #     chunk_weights.append(weights[last:])
-    #     chunk_flags.append(ti_flags[last:])
-
-    #     # remove empty chunks
-    #     chunks = [chunk for ichunk, chunk in enumerate(chunks) if ichunk == 0 or chunk != []]
-    #     chunk_weights = [w for ichunk, w in enumerate(chunk_weights) if ichunk == 0 or w != []]
-    #     chunk_flags = [f for ichunk, f in enumerate(chunk_flags) if ichunk == 0 or f != []]
-
-    #     # pad each chunk to be model_max_length
-    #     for ichunk in range(len(chunks)):
-    #         while len(chunks[ichunk]) < self.model_max_length - 2:
-    #             chunks[ichunk].append(self.eos_token_id)
-    #             chunk_weights[ichunk].append(1.0)
-    #             chunk_flags[ichunk].append(0)
-        
-    #     # add bos and eos tokens to each chunk
-    #     for ichunk in range(len(chunks)):
-    #         chunks[ichunk] = [self.bos_token_id] + chunks[ichunk] + [self.eos_token_id]
-    #         chunk_weights[ichunk] = [1.0] + chunk_weights[ichunk] + [1.0]
-    #         chunk_flags[ichunk] = [0] + chunk_flags[ichunk] + [0]
-        
-    #     return chunks, chunk_weights, chunk_flags
-
-    # def get_token_embeds(self, batch_tokens, batch_flags):
-    #     input_ids = torch.asarray(batch_tokens, device=self.device)
-    #     batch_flags = torch.asarray(batch_flags, device=self.device)
-    #     input_shape = input_ids.size()
-    #     input_ids = input_ids.view(-1, input_shape[-1])
-    #     input_embs = self.transformer.text_model.embeddings(input_ids=input_ids, position_ids=None)
-    #     for idx in self.ti_index2name.keys():
-
-
-    # def encode_batch_tokens(self, batch_tokens):
-    #     batch_tokens = torch.asarray(batch_tokens, device=self.device)
-    #     outputs = self.transformer(input_ids=batch_tokens, output_hidden_states=(self.layer == 'hidden'))
-    #     if self.layer == 'hidden':
-    #         h = outputs.hidden_states[self.layer_idx]
-    #         h = self.transformer.text_model.final_layer_norm(h)
-    #     else:
-    #         h = outputs.last_hidden_state
-    #     return h
