@@ -911,13 +911,11 @@ class UNetModel(nn.Module):
             else:
                 raise ValueError()
 
-        self.input_blocks = nn.ModuleList(
-            [
-                TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
-                )
-            ]
-        )
+        self.input_blocks = nn.ModuleList([
+            TimestepEmbedSequential(
+                conv_nd(dims, in_channels, model_channels, 3, padding=1)
+            )
+        ])
         self._feature_size = model_channels
         input_block_chans = [model_channels]
         ch = model_channels
@@ -1102,10 +1100,10 @@ class UNetModel(nn.Module):
         )
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(
-            nn.GroupNorm(32, ch),
-            conv_nd(dims, model_channels, n_embed, 1),
-            #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
-        )
+                nn.GroupNorm(32, ch),
+                conv_nd(dims, model_channels, n_embed, 1),
+                #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
+            )
 
     def convert_to_fp16(self):
         """
