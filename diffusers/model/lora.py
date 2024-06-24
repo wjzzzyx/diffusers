@@ -29,31 +29,31 @@ def convert_lora_module_name(key):
         return f'diffusion_model_time_embed_{int(m.group(1)) * 2 - 2}{m.group(2)}'
     m = re.match(r"lora_unet_down_blocks_(\d+)_attentions_(\d+)_(.+)", key)
     if m:
-        return f"diffusion_model_input_blocks_{1 + m.group(1) * 3 + m.group(2)}_1_{m.group(3)}"
+        return f"diffusion_model_input_blocks_{1 + int(m.group(1)) * 3 + int(m.group(2))}_1_{m.group(3)}"
     m = re.match(r"lora_unet_down_blocks_(\d+)_resnets_(\d+)_(.+)", key)
     if m:
         suffix = suffix_conversion.get(m.group(3), m.group(3))
-        return f"diffusion_model_input_blocks_{1 + m.group(1) * 3 + m.group(2)}_0_{suffix}"
+        return f"diffusion_model_input_blocks_{1 + int(m.group(1)) * 3 + int(m.group(2))}_0_{suffix}"
     m = re.match(r"lora_unet_mid_block_resnets_(\d+)_(.+)", key)
     if m:
         suffix = suffix_conversion.get(m.group(2), m.group(2))
-        return f"diffusion_model_middle_block_{m.group(1) * 2}_{suffix}"
+        return f"diffusion_model_middle_block_{int(m.group(1)) * 2}_{suffix}"
     m = re.match(r"lora_unet_mid_block_attentions_(\d+)_(.+)", key)
     if m:
         return f"diffusion_model_middle_block_1_{m.group(2)}"
     m = re.match(r"lora_unet_up_blocks_(\d+)_resnets_(\d+)_(.+)", key)
     if m:
         suffix = suffix_conversion.get(m.group(3), m.group(3))
-        return f"diffusion_model_output_blocks_{m.group(1) * 3 + m.group(2)}_0_{suffix}"
+        return f"diffusion_model_output_blocks_{int(m.group(1)) * 3 + int(m.group(2))}_0_{suffix}"
     m = re.match(r"lora_unet_up_blocks_(\d+)_attentions_(\d+)_(.+)", key)
     if m:
-        return f"diffusion_model_output_blocks_{m.group(1) * 3 + m.group(2)}_1_{m.group(3)}"
+        return f"diffusion_model_output_blocks_{int(m.group(1)) * 3 + int(m.group(2))}_1_{m.group(3)}"
     m = re.match(r"lora_unet_down_blocks_(\d+)_downsamplers_0_conv", key)
     if m:
-        return f"diffusion_model_input_blocks_{3 + m.group(1) * 3}_0_op"
+        return f"diffusion_model_input_blocks_{3 + int(m.group(1)) * 3}_0_op"
     m = re.match(r"lora_unet_up_blocks_(\d+)_upsamplers_0_conv", key)
     if m:
-        return f"diffusion_model_output_blocks_{2 + m.group(1) * 3}_{2 if m.group(1) > 0 else 1}_conv"
+        return f"diffusion_model_output_blocks_{2 + int(m.group(1)) * 3}_{2 if int(m.group(1)) > 0 else 1}_conv"
     m = re.match(r"lora_te_text_model_encoder_layers_(\d+)_(.+)", key)
     if m:
         return f"cond_stage_model_transformer_text_model_encoder_layers_{m.group(1)}_{m.group(2)}"
@@ -154,13 +154,32 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
     
     def add_lora_modules(self, model_config):
+        self.lora_module_names = list()
         for name, module in self.diffusion_model.named_modules():
             if module.__class__.__name__ == 'SpatialTransformer':
                 for child_name, child_module in module.named_modules():
                     if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
-                        lora_name = f'lora_unet_{name}_{child_name}'
-                        lora_module = LoRAMLP(
+                        lora_name = f'lora_unet.{name}.{child_name}'
+                        lora_name = lora_name.replace('.', '_')
+                        lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
+                        lora_module = lora_module_cls(
                             child_module, model_config.lora_dim, model_config.lora_alpha,
                             model_config.dropout_module, model_config.dropout, model_config.dropout_rank
                         )
                         self.add_module(lora_name, lora_module)
+                        self.lora_module_names.append(lora_name)
+        
+        for name, module in self.cond_stage_model.named_modules():
+            if module.__class__.__name__ in ['CLIPAttention', 'CLIPMLP']:
+                for child_name, child_module in module.named_modules():
+                    if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
+                        lora_name = f'lora_te.{name}.{child_name}'
+                        lora_name = lora_name.replace('.', '_')
+                        lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
+                        lora_module = lora_module_cls(
+                            child_module, model_config.lora_dim, model_config.lora_alpha,
+                            model_config.dropout_module, model_config.dropout, model_config.dropout_rank
+                        )
+                        self.add_module(lora_name, lora_module)
+                        self.lora_module_names.append(lora_name)
+        
