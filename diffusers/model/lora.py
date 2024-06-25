@@ -1,5 +1,6 @@
 import math
 import re
+import safetensors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -149,7 +150,8 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
     
         self.add_lora_modules(model_config)
         if 'pretrained_lora' in model_config:
-            checkpoint = torch.load(model_config.pretrained_lora, map_location='cpu')
+            # checkpoint = torch.load(model_config.pretrained_lora, map_location='cpu')
+            checkpoint = safetensors.torch.load_file(model_config.pretrained_lora, device='cpu')
             state_dict = convert_lora_module_names(checkpoint)
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
     
