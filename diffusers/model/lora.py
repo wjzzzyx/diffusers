@@ -148,28 +148,39 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
             replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
     
-        self.add_lora_modules(model_config)
         if 'pretrained_lora' in model_config:
             # checkpoint = torch.load(model_config.pretrained_lora, map_location='cpu')
             checkpoint = safetensors.torch.load_file(model_config.pretrained_lora, device='cpu')
             state_dict = convert_lora_module_names(checkpoint)
+            self.add_lora_modules_from_weight(state_dict)
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
+        else:
+            self.add_lora_modules(
+                model_config.lora_dim, model_config.lora_alpha, 
+                model_config.dropout_module, model_config.dropout, model_config.dropout_rank
+            )
     
-    def add_lora_modules(self, model_config):
+    def add_lora_modules(self, lora_dim, lora_alpha, dropout_module=0, dropout=0, dropout_rank=0):
         self.lora_module_names = list()
+
+        def add_a_module(lora_name, child_module):
+            lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
+            dim = lora_dim[lora_name] if isinstance(lora_dim, dict) else lora_dim
+            alpha = lora_alpha[lora_name] if isinstance(lora_alpha, dict) else lora_alpha
+            lora_module = lora_module_cls(
+                child_module, dim, alpha,
+                dropout_module, dropout, dropout_rank
+            )
+            self.add_module(lora_name, lora_module)
+            self.lora_module_names.append(lora_name)
+
         for name, module in self.diffusion_model.named_modules():
             if module.__class__.__name__ == 'SpatialTransformer':
                 for child_name, child_module in module.named_modules():
                     if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
                         lora_name = f'lora_unet.{name}.{child_name}'
                         lora_name = lora_name.replace('.', '_')
-                        lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
-                        lora_module = lora_module_cls(
-                            child_module, model_config.lora_dim, model_config.lora_alpha,
-                            model_config.dropout_module, model_config.dropout, model_config.dropout_rank
-                        )
-                        self.add_module(lora_name, lora_module)
-                        self.lora_module_names.append(lora_name)
+                        add_a_module(lora_name, child_module)
         
         for name, module in self.cond_stage_model.named_modules():
             if module.__class__.__name__ in ['CLIPAttention', 'CLIPMLP']:
@@ -177,11 +188,19 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
                     if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
                         lora_name = f'lora_te.{name}.{child_name}'
                         lora_name = lora_name.replace('.', '_')
-                        lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
-                        lora_module = lora_module_cls(
-                            child_module, model_config.lora_dim, model_config.lora_alpha,
-                            model_config.dropout_module, model_config.dropout, model_config.dropout_rank
-                        )
-                        self.add_module(lora_name, lora_module)
-                        self.lora_module_names.append(lora_name)
-        
+                        add_a_module(lora_name, child_module)
+    
+    def add_lora_modules_from_weight(self, state_dict):
+        loraname2alpha = dict()
+        loraname2dim = dict()
+        for key, weight in state_dict.items():
+            lora_name = key.split('.')[0]
+            if 'alpha' in key:
+                loraname2alpha[lora_name] = weight
+            elif 'lora_down' in key:
+                loraname2dim[lora_name] = weight.size(0)
+        assert(loraname2alpha.keys() == loraname2dim.keys())
+
+        self.add_lora_modules(loraname2dim, loraname2alpha)
+    
+    
