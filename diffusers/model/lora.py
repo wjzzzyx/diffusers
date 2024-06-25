@@ -21,43 +21,43 @@ suffix_conversion = {
 def convert_lora_module_name(key):
     m = re.match(r"lora_unet_conv_in(.*)", key)
     if m:
-        return f'diffusion_model_input_blocks_0_0{m.group(1)}'
+        return f'lora_unet_input_blocks_0_0{m.group(1)}'
     m = re.match(r"lora_unet_conv_out(.*)", key)
     if m:
-        return f'diffusion_model_out_2{m.group(1)}'
+        return f'lora_unet_out_2{m.group(1)}'
     m = re.match(r"lora_unet_time_embedding_linear_(\d+)(.*)", key)
     if m:
-        return f'diffusion_model_time_embed_{int(m.group(1)) * 2 - 2}{m.group(2)}'
+        return f'lora_unet_time_embed_{int(m.group(1)) * 2 - 2}{m.group(2)}'
     m = re.match(r"lora_unet_down_blocks_(\d+)_attentions_(\d+)_(.+)", key)
     if m:
-        return f"diffusion_model_input_blocks_{1 + int(m.group(1)) * 3 + int(m.group(2))}_1_{m.group(3)}"
+        return f"lora_unet_input_blocks_{1 + int(m.group(1)) * 3 + int(m.group(2))}_1_{m.group(3)}"
     m = re.match(r"lora_unet_down_blocks_(\d+)_resnets_(\d+)_(.+)", key)
     if m:
         suffix = suffix_conversion.get(m.group(3), m.group(3))
-        return f"diffusion_model_input_blocks_{1 + int(m.group(1)) * 3 + int(m.group(2))}_0_{suffix}"
+        return f"lora_unet_input_blocks_{1 + int(m.group(1)) * 3 + int(m.group(2))}_0_{suffix}"
     m = re.match(r"lora_unet_mid_block_resnets_(\d+)_(.+)", key)
     if m:
         suffix = suffix_conversion.get(m.group(2), m.group(2))
-        return f"diffusion_model_middle_block_{int(m.group(1)) * 2}_{suffix}"
+        return f"lora_unet_middle_block_{int(m.group(1)) * 2}_{suffix}"
     m = re.match(r"lora_unet_mid_block_attentions_(\d+)_(.+)", key)
     if m:
-        return f"diffusion_model_middle_block_1_{m.group(2)}"
+        return f"lora_unet_middle_block_1_{m.group(2)}"
     m = re.match(r"lora_unet_up_blocks_(\d+)_resnets_(\d+)_(.+)", key)
     if m:
         suffix = suffix_conversion.get(m.group(3), m.group(3))
-        return f"diffusion_model_output_blocks_{int(m.group(1)) * 3 + int(m.group(2))}_0_{suffix}"
+        return f"lora_unet_output_blocks_{int(m.group(1)) * 3 + int(m.group(2))}_0_{suffix}"
     m = re.match(r"lora_unet_up_blocks_(\d+)_attentions_(\d+)_(.+)", key)
     if m:
-        return f"diffusion_model_output_blocks_{int(m.group(1)) * 3 + int(m.group(2))}_1_{m.group(3)}"
+        return f"lora_unet_output_blocks_{int(m.group(1)) * 3 + int(m.group(2))}_1_{m.group(3)}"
     m = re.match(r"lora_unet_down_blocks_(\d+)_downsamplers_0_conv", key)
     if m:
-        return f"diffusion_model_input_blocks_{3 + int(m.group(1)) * 3}_0_op"
+        return f"lora_unet_input_blocks_{3 + int(m.group(1)) * 3}_0_op"
     m = re.match(r"lora_unet_up_blocks_(\d+)_upsamplers_0_conv", key)
     if m:
-        return f"diffusion_model_output_blocks_{2 + int(m.group(1)) * 3}_{2 if int(m.group(1)) > 0 else 1}_conv"
+        return f"lora_unet_output_blocks_{2 + int(m.group(1)) * 3}_{2 if int(m.group(1)) > 0 else 1}_conv"
     m = re.match(r"lora_te_text_model_encoder_layers_(\d+)_(.+)", key)
     if m:
-        return f"cond_stage_model_transformer_text_model_encoder_layers_{m.group(1)}_{m.group(2)}"
+        return f"lora_te_transformer_text_model_encoder_layers_{m.group(1)}_{m.group(2)}"
     raise ValueError('Unmatched Lora module name {key}')
     
 
