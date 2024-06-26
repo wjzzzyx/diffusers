@@ -96,6 +96,7 @@ class LoRABase(nn.Module):
 
         x = self.lora_down(x)
         
+        scale = self.scale
         if self.training:
             if self.dropout > 0:
                 x = F.dropout(x, p=self.dropout)
@@ -103,8 +104,6 @@ class LoRABase(nn.Module):
                 mask = torch.rand((x.size(0), self.lora_dim, *x.shape[2:]), device=x.device) > self.dropout_rank
                 x = x * mask
                 scale = self.scale * (1.0 / (1.0 - self.dropout_rank))
-            else:
-                scale = self.scale
         
         x = self.lora_up(x)
         return org_out + scale * x
@@ -143,14 +142,19 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
     def __init__(self, model_config):
         super().__init__(model_config)
         if 'pretrained' in model_config:
-            checkpoint = torch.load(model_config.pretrained, map_location='cpu')
-            state_dict = checkpoint['state_dict']
+            if model_config.pretrained.endswith('safetensors'):
+                checkpoint = safetensors.torch.load_file(model_config.pretrained, device='cpu')
+            else:
+                checkpoint = torch.load(model_config.pretrained, map_location='cpu')
+            state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
             replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
     
         if 'pretrained_lora' in model_config:
-            # checkpoint = torch.load(model_config.pretrained_lora, map_location='cpu')
-            checkpoint = safetensors.torch.load_file(model_config.pretrained_lora, device='cpu')
+            if model_config.pretrained_lora.endswith('safetensors'):
+                checkpoint = safetensors.torch.load_file(model_config.pretrained_lora, device='cpu')
+            else:
+                checkpoint = torch.load(model_config.pretrained_lora, map_location='cpu')
             state_dict = convert_lora_module_names(checkpoint)
             self.add_lora_modules_from_weight(state_dict)
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
@@ -196,11 +200,10 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
         for key, weight in state_dict.items():
             lora_name = key.split('.')[0]
             if 'alpha' in key:
-                loraname2alpha[lora_name] = weight
+                loraname2alpha[lora_name] = weight.item()
             elif 'lora_down' in key:
                 loraname2dim[lora_name] = weight.size(0)
         assert(loraname2alpha.keys() == loraname2dim.keys())
 
         self.add_lora_modules(loraname2dim, loraname2alpha)
-    
     
