@@ -76,14 +76,14 @@ class TextEncoderUnlimited(nn.Module):
                 split_points.append(i)
                 pos = 0
                 i += 1
-            elif tokens[i] == self.comma_token_id:
-                last_comma = i
-                pos += 1
-                i += 1
             elif pos == self.model_max_length - 2:
                 split_points.append(last_comma)
                 pos = 0
                 i = last_comma + 1
+            elif tokens[i] == self.comma_token_id:
+                last_comma = i
+                pos += 1
+                i += 1
             else:
                 pos += 1
                 i += 1
