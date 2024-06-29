@@ -120,6 +120,12 @@ class LoRAMLP(LoRABase):
 
         nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_up.weight)
+    
+    @torch.no_grad()
+    def merge(self, multiplier):
+        self.org_module.weight = (
+            self.org_module.weight + multiplier * self.scale * (self.lora_up.weight @ self.lora_down.weight)
+        )
 
 
 class LoRAConv(LoRABase):
@@ -136,6 +142,70 @@ class LoRAConv(LoRABase):
 
         nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_up.weight)
+    
+    @torch.no_grad()
+    def merge(self, multiplier):
+        self.org_module.weight = (
+            self.org_module.weight
+            + multiplier * self.scale * (
+                self.lora_up.weight.squeeze(3).squeeze(2) @ self.lora_down.weight.squeeze(3).squeeze(2)
+            ).unsqueeze(2).unsqueeze(3)
+        )
+
+
+class LoraNetwork(nn.Module):
+    def __init__(self, multiplier):
+        self.multiplier = multiplier
+
+    def add_lora_modules(
+        self, lora_dim, lora_alpha, diffusion_model, cond_stage_model,
+        dropout_module=0, dropout=0, dropout_rank=0
+    ):
+        self.lora_module_names = list()
+
+        def add_a_module(lora_name, child_module):
+            lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
+            dim = lora_dim[lora_name] if isinstance(lora_dim, dict) else lora_dim
+            alpha = lora_alpha[lora_name] if isinstance(lora_alpha, dict) else lora_alpha
+            lora_module = lora_module_cls(
+                child_module, dim, alpha,
+                dropout_module, dropout, dropout_rank
+            )
+            self.add_module(lora_name, lora_module)
+            self.lora_module_names.append(lora_name)
+
+        for name, module in diffusion_model.named_modules():
+            if module.__class__.__name__ == 'SpatialTransformer':
+                for child_name, child_module in module.named_modules():
+                    if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
+                        lora_name = f'lora_unet.{name}.{child_name}'
+                        lora_name = lora_name.replace('.', '_')
+                        add_a_module(lora_name, child_module)
+        
+        for name, module in cond_stage_model.named_modules():
+            if module.__class__.__name__ in ['CLIPAttention', 'CLIPMLP']:
+                for child_name, child_module in module.named_modules():
+                    if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
+                        lora_name = f'lora_te.{name}.{child_name}'
+                        lora_name = lora_name.replace('.', '_')
+                        add_a_module(lora_name, child_module)
+    
+    def add_lora_modules_from_weight(self, state_dict, diffusion_model, cond_stage_model):
+        loraname2alpha = dict()
+        loraname2dim = dict()
+        for key, weight in state_dict.items():
+            lora_name = key.split('.')[0]
+            if 'alpha' in key:
+                loraname2alpha[lora_name] = weight.item()
+            elif 'lora_down' in key:
+                loraname2dim[lora_name] = weight.size(0)
+        assert(loraname2alpha.keys() == loraname2dim.keys())
+
+        self.add_lora_modules(loraname2dim, loraname2alpha, diffusion_model, cond_stage_model)
+    
+    def merge(self):
+        for name, child_module in self.named_children():
+            child_module.merge(self.multiplier)
 
 
 class StableDiffusion_Lora(StableDiffusion_StabilityAI):
@@ -150,60 +220,23 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
             replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
     
+        self.lora_networks = nn.ModuleList()
         if 'pretrained_lora' in model_config:
-            if model_config.pretrained_lora.endswith('safetensors'):
-                checkpoint = safetensors.torch.load_file(model_config.pretrained_lora, device='cpu')
-            else:
-                checkpoint = torch.load(model_config.pretrained_lora, map_location='cpu')
-            state_dict = convert_lora_module_names(checkpoint)
-            self.add_lora_modules_from_weight(state_dict)
-            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            for multiplier, checkpoint_path in model_config.pretrained_lora:
+                if model_config.pretrained_lora.endswith('safetensors'):
+                    checkpoint = safetensors.torch.load_file(checkpoint_path, device='cpu')
+                else:
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                state_dict = convert_lora_module_names(checkpoint)
+                network = LoraNetwork(multiplier)
+                network.add_lora_modules_from_weight(state_dict, self.diffusion_model, self.cond_stage_model)
+                missing, unexpected = network.load_state_dict(state_dict, strict=False)
+                self.lora_networks.append(network)
         else:
-            self.add_lora_modules(
-                model_config.lora_dim, model_config.lora_alpha, 
+            network = LoraNetwork(multiplier)
+            network.add_lora_modules(
+                model_config.lora_dim, model_config.lora_alpha, self.diffusion_model, self.cond_stage_model,
                 model_config.dropout_module, model_config.dropout, model_config.dropout_rank
             )
-    
-    def add_lora_modules(self, lora_dim, lora_alpha, dropout_module=0, dropout=0, dropout_rank=0):
-        self.lora_module_names = list()
-
-        def add_a_module(lora_name, child_module):
-            lora_module_cls = LoRAMLP if child_module.__class__.__name__ == 'Linear' else LoRAConv
-            dim = lora_dim[lora_name] if isinstance(lora_dim, dict) else lora_dim
-            alpha = lora_alpha[lora_name] if isinstance(lora_alpha, dict) else lora_alpha
-            lora_module = lora_module_cls(
-                child_module, dim, alpha,
-                dropout_module, dropout, dropout_rank
-            )
-            self.add_module(lora_name, lora_module)
-            self.lora_module_names.append(lora_name)
-
-        for name, module in self.diffusion_model.named_modules():
-            if module.__class__.__name__ == 'SpatialTransformer':
-                for child_name, child_module in module.named_modules():
-                    if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
-                        lora_name = f'lora_unet.{name}.{child_name}'
-                        lora_name = lora_name.replace('.', '_')
-                        add_a_module(lora_name, child_module)
-        
-        for name, module in self.cond_stage_model.named_modules():
-            if module.__class__.__name__ in ['CLIPAttention', 'CLIPMLP']:
-                for child_name, child_module in module.named_modules():
-                    if child_module.__class__.__name__ in ['Linear', 'Conv2d']:
-                        lora_name = f'lora_te.{name}.{child_name}'
-                        lora_name = lora_name.replace('.', '_')
-                        add_a_module(lora_name, child_module)
-    
-    def add_lora_modules_from_weight(self, state_dict):
-        loraname2alpha = dict()
-        loraname2dim = dict()
-        for key, weight in state_dict.items():
-            lora_name = key.split('.')[0]
-            if 'alpha' in key:
-                loraname2alpha[lora_name] = weight.item()
-            elif 'lora_down' in key:
-                loraname2dim[lora_name] = weight.size(0)
-        assert(loraname2alpha.keys() == loraname2dim.keys())
-
-        self.add_lora_modules(loraname2dim, loraname2alpha)
+            self.lora_networks.append(network)
     
