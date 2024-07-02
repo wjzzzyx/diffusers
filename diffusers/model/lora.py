@@ -212,15 +212,6 @@ class LoraNetwork(nn.Module):
 class StableDiffusion_Lora(StableDiffusion_StabilityAI):
     def __init__(self, model_config):
         super().__init__(model_config)
-        if 'pretrained' in model_config:
-            if model_config.pretrained.endswith('safetensors'):
-                checkpoint = safetensors.torch.load_file(model_config.pretrained, device='cpu')
-            else:
-                checkpoint = torch.load(model_config.pretrained, map_location='cpu')
-            state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
-            replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
-            missing, unexpected = self.load_state_dict(state_dict, strict=False)
-    
         self.lora_networks = nn.ModuleList()
         if 'pretrained_lora' in model_config:
             for cfg in model_config.pretrained_lora:

@@ -7,40 +7,31 @@ import torch.nn as nn
 
 import utils
 from diffusers.model import ema
-from diffusers.model.vae import DiagonalGaussianDistribution
+from diffusers.model.stable_diffusion_stabilityai import StableDiffusion_StabilityAI
 from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
-from torch_utils import replace_substring_in_state_dict_if_present
 
 
-class StableDiffusion_TextualInversion(nn.Module):
+class StableDiffusion_TextualInversion(StableDiffusion_StabilityAI):
     """A custom version of Stable Diffusion Textual Inversion Model"""
     def __init__(self, model_config):
-        super().__init__()
-        self.prediction_type = model_config.prediction_type
-        self.scale_factor = model_config.scale_factor
-
-        self.first_stage_model = utils.instantiate_from_config(model_config.first_stage_config)
-        self.cond_stage_model = utils.instantiate_from_config(model_config.cond_stage_config)
-        self.diffusion_model = utils.instantiate_from_config(model_config.unet_config)
-
-        # freeze ae and text encoder
+        super().__init__(model_config)
+        # freeze ae and unet
         self.first_stage_model.eval()
         self.first_stage_model.requires_grad_(False)
         self.diffusion_model.eval()
         self.diffusion_model.requires_grad_(False)
-
-        if 'pretrained' in model_config:
-            checkpoint = torch.load(model_config.pretrained, map_location='cpu')
-            state_dict = checkpoint['state_dict']
-            replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
-            missing, unexpected = self.load_state_dict(state_dict, strict=False)
         
         # support additional tokens and embeddings
-        self.cond_stage_model.expand_vocab()
-    
-    @property
-    def device(self):
-        return self.diffusion_model.time_embed[0].weight.device
+        if 'pretrained_ti' in model_config:
+            names = list()
+            embeddings = list()
+            for cfg in model_config.pretrained_ti:
+                names.append(cfg.name)
+                checkpoint = torch.load(cfg.path, map_location='cpu')
+                embeddings.append(checkpoint['string_to_param'])
+            self.cond_stage_model.expand_vocab_from_weight(names, embeddings)
+        else:
+            self.cond_stage_model.expand_vocab()
     
     def trainable_parameters(self):
         return self.cond_stage_model.trainable_parameters()
@@ -62,24 +53,6 @@ class StableDiffusion_TextualInversion(nn.Module):
         target = noise
 
         return output, target, xt
-    
-    def forward_diffusion_model(self, xt, t, cond_prompt):
-        output = self.diffusion_model(xt, t, cond_prompt)
-        return output
-    
-    def encode_first_stage(self, x):
-        encoder_posterior = self.first_stage_model.encode(x)
-        if isinstance(encoder_posterior, DiagonalGaussianDistribution):
-            z = encoder_posterior.sample()
-        elif isinstance(encoder_posterior, torch.Tensor):
-            z = encoder_posterior
-        else:
-            raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
-        return self.scale_factor * z
-    
-    def decode_first_stage(self, z):
-        z = 1. / self.scale_factor * z
-        return self.first_stage_model.decode(z)
 
 
 class PLTextualInversion(lightning.LightningModule):

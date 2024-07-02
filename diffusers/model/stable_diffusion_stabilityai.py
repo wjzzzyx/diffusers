@@ -4,6 +4,7 @@ import logging
 import math
 import numpy as np
 from packaging import version
+import safetensors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,6 +61,7 @@ _ATTN_PRECISION = os.environ.get("ATTN_PRECISION", "fp32")
 import utils
 import torch_utils
 from diffusers.model.vae import DiagonalGaussianDistribution
+from torch_utils import replace_substring_in_state_dict_if_present
 
 
 def conv_nd(dims, *args, **kwargs):
@@ -1166,18 +1168,24 @@ class StableDiffusion_StabilityAI(nn.Module):
         self.scale_factor = model_config.scale_factor
 
         self.first_stage_model = utils.instantiate_from_config(model_config.first_stage_config)
-        
-        if model_config.cond_stage_config:
-            self.cond_stage_model = utils.instantiate_from_config(model_config.cond_stage_config)
-        
+        self.cond_stage_model = utils.instantiate_from_config(model_config.cond_stage_config)
         self.diffusion_model = utils.instantiate_from_config(model_config.unet_config)
         # self.diffusion_model.log_var = 
 
+        if 'pretrained' in model_config:
+            if model_config.pretrained.endswith('safetensors'):
+                checkpoint = safetensors.torch.load_file(model_config.pretrained, device='cpu')
+            else:
+                checkpoint = torch.load(model_config.pretrained, map_location='cpu')
+            state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
+            replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+
         # freeze ae and text encoder
-        self.first_stage_model.eval()
-        self.first_stage_model.requires_grad_(False)
-        self.cond_stage_model.eval()
-        self.cond_stage_model.requires_grad_(False)
+        # self.first_stage_model.eval()
+        # self.first_stage_model.requires_grad_(False)
+        # self.cond_stage_model.eval()
+        # self.cond_stage_model.requires_grad_(False)
     
     @property
     def device(self):

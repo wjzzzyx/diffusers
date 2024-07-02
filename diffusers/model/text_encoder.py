@@ -320,29 +320,16 @@ class OpenCLIPTextEncoderPooled(OpenCLIPTextEncoder):
         return out, x
 
 
-class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
+class CLIPTextEncoder_TextualInversion(CLIPTextEncoder):
     """Uses the CLIP transformer encoder for text (from huggingface). Allow additional tokens for textual inversion."""
 
     def __init__(
-        self, ti_names, ti_num_tokens_per_name,
-        version="openai/clip-vit-large-patch14", layer="last", layer_idx=-1
+        self, version="openai/clip-vit-large-patch14", layer="last", layer_idx=-1,
+        ti_name2numtoken=None
     ):
-        super().__init__()
-        assert layer in self.LAYERS
-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
-        self.transformer = CLIPTextModel.from_pretrained(version)
-        self.layer = layer
-        self.layer_idx = layer_idx
-
+        super().__init__(version, layer, layer_idx)
         self.original_num_tokens = len(self.tokenizer)
-        self.ti_name2numtoken = {name: num_token for name, num_token in zip(ti_names, ti_num_tokens_per_name)}
-        
-        vocab = self.tokenizer.get_vocab()
-        self.bos_token_id = self.tokenizer.bos_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
-        self.model_max_length = self.tokenizer.model_max_length
-        self.comma_token_id = vocab.get(',</w>', None)
-        self.stop_token_id = vocab.get('.</w>', None)
+        self.ti_name2numtoken = dict(ti_name2numtoken) if ti_name2numtoken else None
 
         # freeze all parameters except for token embeddings
         self.transformer.requires_grad_(True)
@@ -351,7 +338,7 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
         self.transformer.text_model.embeddings.position_embedding.requires_grad_(False)
     
     def expand_vocab(self):
-        for name, num_tokens in self.name2numtoken.items():
+        for name, num_tokens in self.ti_name2numtoken.items():
             name_repeats = [f'{name}{i}' for i in range(len(num_tokens))]
             num_added_tokens = self.tokenizer.add_tokens(name_repeats)
             assert(num_added_tokens == num_tokens)
@@ -362,35 +349,23 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
         self.original_token_embedding = self.transformer.text_model.embeddings.token_embedding.clone()
         self.transformer.resize_token_embeddings(len(self.tokenizer))
         # TODO initialize new embeddings
-        # TODO load pretrained new embeddings
     
-    @property
-    def device(self):
-        return self.transformer.text_model.embeddings.token_embedding.weight.device
+    def expand_vocab_from_weight(self, names, embeddings):
+        self.ti_name2numtoken = {name: emb.size(0) for name, emb in zip(names, embeddings)}
+        self.expand_vocab()
+        index = self.original_num_tokens
+        with torch.no_grad():
+            for name, embedding in zip(names, embeddings):
+                num_token = embedding.size(0)
+                self.transformer.text_model.embeddings.token_embedding[index:index+num_token] = embedding
+                index += num_token
     
     def trainable_parameters(self):
         return self.transformer.text_model.embeddings.token_embedding.parameters()
 
     def forward(self, texts):
         texts = self.repeat_ti_names(texts)
-        texts_with_weights = self.parse_weighted_text(texts)
-        tokens, weights = self.get_tokens(texts_with_weights)
-        chunks, chunk_weights = self.split_chunks(tokens, weights)    # list(batch) of list(chunk)
-        chunks_input = list(map(list, zip(*chunks)))    # list(chunk) of list(batch)
-
-        text_embs = list()
-        for chunk in chunks_input:
-            emb = self.encode_batch_tokens(chunk)
-            text_embs.append(emb)
-        text_embs = torch.concatenate(text_embs, dim=1)    # shape (batch, seq, emb)
-
-        weights = torch.asarray(chunk_weights, device=self.device).view(len(chunk_weights), -1)
-        original_mean = text_embs.mean(dim=(1, 2))
-        text_embs = text_embs * weights.unsqueeze(-1)
-        new_mean = text_embs.mean(dim=(1, 2))
-        text_embs = text_embs * (original_mean / new_mean)[:, None, None]
-
-        return text_embs
+        return super().forward(texts)
     
     def repeat_ti_names(self, texts):
         for i in range(len(texts)):
@@ -400,20 +375,6 @@ class CLIPTextEncoder_TextualInversion(TextEncoderWeighted):
                     text = text.replace(name, ' '.join([f'{name}{j}' for j in range(num_token)]))
             texts[i] = text
         return texts
-    
-    def tokenize(self, text):
-        # text is a single string
-        return self.tokenizer(text, truncation=False, add_special_tokens=False).input_ids
-    
-    def encode_batch_tokens(self, batch_tokens):
-        batch_tokens = torch.asarray(batch_tokens, device=self.device)
-        outputs = self.transformer(input_ids=batch_tokens, output_hidden_states=(self.layer == 'hidden'))
-        if self.layer == 'hidden':
-            h = outputs.hidden_states[self.layer_idx]
-            h = self.transformer.text_model.final_layer_norm(h)
-        else:
-            h = outputs.last_hidden_state
-        return h
     
     def freeze_original_embedding(self):
         with torch.no_grad():
