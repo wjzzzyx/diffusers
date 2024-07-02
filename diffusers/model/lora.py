@@ -155,6 +155,7 @@ class LoRAConv(LoRABase):
 
 class LoraNetwork(nn.Module):
     def __init__(self, multiplier):
+        super().__init__()
         self.multiplier = multiplier
 
     def add_lora_modules(
@@ -222,18 +223,18 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
     
         self.lora_networks = nn.ModuleList()
         if 'pretrained_lora' in model_config:
-            for multiplier, checkpoint_path in model_config.pretrained_lora:
-                if model_config.pretrained_lora.endswith('safetensors'):
-                    checkpoint = safetensors.torch.load_file(checkpoint_path, device='cpu')
+            for cfg in model_config.pretrained_lora:
+                if cfg.path.endswith('safetensors'):
+                    checkpoint = safetensors.torch.load_file(cfg.path, device='cpu')
                 else:
-                    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                    checkpoint = torch.load(cfg.path, map_location='cpu')
                 state_dict = convert_lora_module_names(checkpoint)
-                network = LoraNetwork(multiplier)
+                network = LoraNetwork(cfg.multiplier)
                 network.add_lora_modules_from_weight(state_dict, self.diffusion_model, self.cond_stage_model)
                 missing, unexpected = network.load_state_dict(state_dict, strict=False)
                 self.lora_networks.append(network)
         else:
-            network = LoraNetwork(multiplier)
+            network = LoraNetwork(1.0)
             network.add_lora_modules(
                 model_config.lora_dim, model_config.lora_alpha, self.diffusion_model, self.cond_stage_model,
                 model_config.dropout_module, model_config.dropout, model_config.dropout_rank
