@@ -22,8 +22,8 @@ model:
       cond_stage_config:
         target: diffusers.model.text_encoder.CLIPTextEncoder_TextualInversion
         params:
-          ti_names: [<>]
-          ti_num_tokens_per_name: [4]
+          ti_name2numtoken:
+            <cat_statue>: 4
       unet_config:
         target: diffusers.model.stable_diffusion_stabilityai.UNetModel
         params:

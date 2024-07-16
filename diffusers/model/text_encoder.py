@@ -1,3 +1,4 @@
+import collections
 import open_clip
 import re
 import torch
@@ -75,18 +76,22 @@ class TextEncoderUnlimited(nn.Module):
             if tokens[i] == self.stop_token_id:
                 split_points.append(i)
                 pos = 0
-                i += 1
-            elif pos == self.model_max_length - 2:
-                split_points.append(last_comma)
-                pos = 0
-                i = last_comma + 1
             elif tokens[i] == self.comma_token_id:
                 last_comma = i
                 pos += 1
-                i += 1
             else:
                 pos += 1
-                i += 1
+            
+            if pos == self.model_max_length - 2:
+                if last_comma >= 0:
+                    split_points.append(last_comma)
+                    i = last_comma
+                else:    # no comma used
+                    split_points.append(i)
+                pos = 0
+            
+            i += 1
+            
         return split_points
 
     def encode_batch_tokens(self, batch_tokens):
@@ -329,7 +334,7 @@ class CLIPTextEncoder_TextualInversion(CLIPTextEncoder):
     ):
         super().__init__(version, layer, layer_idx)
         self.original_num_tokens = len(self.tokenizer)
-        self.ti_name2numtoken = dict(ti_name2numtoken) if ti_name2numtoken else None
+        self.ti_name2numtoken = collections.OrderedDict(ti_name2numtoken) if ti_name2numtoken else None
 
         # freeze all parameters except for token embeddings
         self.transformer.requires_grad_(True)
@@ -339,25 +344,25 @@ class CLIPTextEncoder_TextualInversion(CLIPTextEncoder):
     
     def expand_vocab(self):
         for name, num_tokens in self.ti_name2numtoken.items():
-            name_repeats = [f'{name}{i}' for i in range(len(num_tokens))]
+            name_repeats = [f'{name}{i}' for i in range(num_tokens)]
             num_added_tokens = self.tokenizer.add_tokens(name_repeats)
             assert(num_added_tokens == num_tokens)
             token_ids = self.tokenizer.convert_tokens_to_ids(name_repeats)
             assert(min(token_ids) == token_ids[0])
             assert(token_ids[-1] == token_ids[0] + len(token_ids) - 1)
             assert(len(self.tokenizer) - 1 == token_ids[-1])
-        self.original_token_embedding = self.transformer.text_model.embeddings.token_embedding.clone()
+        self.original_token_embedding = self.transformer.text_model.embeddings.token_embedding.weight.clone()
         self.transformer.resize_token_embeddings(len(self.tokenizer))
         # TODO initialize new embeddings
     
     def expand_vocab_from_weight(self, names, embeddings):
-        self.ti_name2numtoken = {name: emb.size(0) for name, emb in zip(names, embeddings)}
+        self.ti_name2numtoken = collections.OrderedDict({name: emb.size(0) for name, emb in zip(names, embeddings)})
         self.expand_vocab()
         index = self.original_num_tokens
         with torch.no_grad():
             for name, embedding in zip(names, embeddings):
                 num_token = embedding.size(0)
-                self.transformer.text_model.embeddings.token_embedding[index:index+num_token] = embedding
+                self.transformer.text_model.embeddings.token_embedding.weight[index:index+num_token] = embedding
                 index += num_token
     
     def trainable_parameters(self):

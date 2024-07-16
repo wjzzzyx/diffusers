@@ -23,7 +23,7 @@ class StableDiffusion_TI_Lora(StableDiffusion_StabilityAI):
             for cfg in model_config.pretrained_ti:
                 names.append(cfg.name)
                 checkpoint = torch.load(cfg.path, map_location='cpu')
-                embeddings.append(checkpoint['string_to_param'])
+                embeddings.append(checkpoint['string_to_param']['*'])
             self.cond_stage_model.expand_vocab_from_weight(names, embeddings)
         else:
             self.cond_stage_model.expand_vocab()

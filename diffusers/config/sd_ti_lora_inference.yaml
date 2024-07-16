@@ -1,5 +1,5 @@
 model:
-  target: diffusers.model.lora.StableDiffusion_Lora
+  target: diffusers.model.sd_ti_lora.StableDiffusion_TI_Lora
   params:
     model_config:
       prediction_type: epsilon
@@ -8,11 +8,15 @@ model:
       pretrained_lora:
         - multiplier: 1.0
           path:
+      pretrained_ti:
+        - name: <deepnegative>
+          path:
       lora_dim: 4
       lora_alpha: 4
       dropout_module: 0
       dropout: 0
       dropout_rank: 0
+
       first_stage_config:
         target: diffusers.model.vae.AutoEncoderKL
         params:
@@ -25,7 +29,7 @@ model:
           attn_resolutions: []
           dropout: 0.0
       cond_stage_config:
-        target: diffusers.model.text_encoder.CLIPTextEncoder
+        target: diffusers.model.text_encoder.CLIPTextEncoder_TextualInversion
       unet_config:
         target: diffusers.model.stable_diffusion_stabilityai.UNetModel
         params:
