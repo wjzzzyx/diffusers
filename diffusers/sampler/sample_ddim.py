@@ -39,7 +39,7 @@ class DDIMSampler():
         t_next = t - self.num_train_steps // self.num_inference_steps
         alpha_cumprod_t = self.alphas_cumprod[t]
         alpha_cumprod_t_next = self.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(1.0, device=xt.device)
-        sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / alpha_cumprod_t_next)
+        sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_next))
         
         pred_x0 = denoised
         pred_z = (xt - torch.sqrt(alpha_cumprod_t) * denoised) / torch.sqrt(1 - alpha_cumprod_t)
