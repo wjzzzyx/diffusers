@@ -1,0 +1,53 @@
+model:
+  target: diffusers.model.controlnet.ControlNet
+  params:
+    model_config:
+      prediction_type: epsilon
+      scale_factor: 0.18215
+      pretrained:
+      pretrained_cn:
+        - multiplier: 1.0
+          path:
+      control_stage_config:
+        image_size: 32 # unused
+        in_channels: 4
+        hint_channels: 3
+        model_channels: 320
+        attention_resolutions: [4, 2, 1]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4]
+        num_heads: 8
+        use_spatial_transformer: True
+        transformer_depth: 1
+        context_dim: 768
+        use_checkpoint: True
+        legacy: False
+      first_stage_config:
+        target: diffusers.model.vae.AutoEncoderKL
+        params:
+          in_channels: 3
+          base_channels: 128
+          out_channels: 3
+          z_channels: 4
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+      cond_stage_config:
+        target: diffusers.model.text_encoder.CLIPTextEncoder
+      unet_config:
+        target: diffusers.model.controlnet.ControlledUnetModel
+        params:
+          image_size: 32 # unused
+          in_channels: 4
+          out_channels: 4
+          model_channels: 320
+          attention_resolutions: [4, 2, 1]
+          num_res_blocks: 2
+          channel_mult: [1, 2, 4, 4]
+          num_heads: 8
+          use_spatial_transformer: True
+          transformer_depth: 1
+          context_dim: 768
+          use_checkpoint: True
+          legacy: False

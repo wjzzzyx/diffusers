@@ -13,15 +13,16 @@ import utils
 
 config = OmegaConf.load('infant/diffusers/config/stable-diffusion-v1-inference.yaml')
 sd_model = utils.instantiate_from_config(config.model)
-checkpoint = safetensors.torch.load_file('infant/diffusers/pretrained/', device='cpu')
-state_dict = checkpoint
-replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
-missing, unexpected = sd_model.load_state_dict(state_dict, strict=False)
+# checkpoint = safetensors.torch.load_file('infant/diffusers/pretrained/', device='cpu')
+# state_dict = checkpoint
+# replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
+# missing, unexpected = sd_model.load_state_dict(state_dict, strict=False)
 sd_model.eval()
 sd_model.cuda()
 
 sampler = utils.instantiate_from_config(config.sampler)
-alphas_cumprod = state_dict['alphas_cumprod']
+# alphas_cumprod = state_dict['alphas_cumprod']
+alphas_cumprod = sampler.alphas_cumprod
 if sd_model.prediction_type == 'epsilon':
     denoiser = KarrasEpsDenoiser(sd_model, alphas_cumprod.cuda())
 elif sd_model.prediction_type == 'v':
@@ -51,7 +52,7 @@ def img2img(image):
     samples = sampler.sample(denoiser, batch_size=1, image=z, denoiser_args=denoiser_args)
     return samples
 
-image = Image.open()
+# image = Image.open()
 samples = txt2img()
 
 samples = sd_model.decode_first_stage(samples)

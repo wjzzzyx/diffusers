@@ -5,7 +5,7 @@ model:
     model_config:
       scale_factor: 0.18215
       prediction_type: 'epsilon'
-
+      pretrained:
       unet_config:
         target: diffusers.model.stable_diffusion_stabilityai.UNetModel
         params:
