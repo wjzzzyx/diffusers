@@ -385,33 +385,32 @@ class DiagonalGaussian(nn.Module):
 
 
 class AutoEncoder(nn.Module):
-    def __init__(
-        self, in_channels, base_channels, out_channels, z_channels,
-        ch_mult, num_res_blocks, resolution, scale_factor, shift_factor
-    ):
+    def __init__(self, config):
         super().__init__()
         self.encoder = Encoder(
-            in_channels=in_channels,
-            ch=base_channels,
-            ch_mult=ch_mult,
-            z_channels=z_channels,
-            num_res_blocks=num_res_blocks,
-            resolution=resolution,
+            in_channels=config.in_channels,
+            ch=config.base_channels,
+            ch_mult=config.ch_mult,
+            z_channels=config.z_channels,
+            num_res_blocks=config.num_res_blocks,
+            resolution=config.resolution,
             attn_type='flux',
+            attn_resolutions=[]
         )
         self.decoder = Decoder(
-            ch=base_channels,
-            out_ch=out_channels,
-            z_channels=z_channels,
-            ch_mult=ch_mult,
-            num_res_blocks=num_res_blocks,
-            resolution=resolution,
+            ch=config.base_channels,
+            out_ch=config.out_channels,
+            z_channels=config.z_channels,
+            ch_mult=config.ch_mult,
+            num_res_blocks=config.num_res_blocks,
+            resolution=config.resolution,
             attn_type='flux',
+            attn_resolutions=[]
         )
         self.reg = DiagonalGaussian()
 
-        self.scale_factor = scale_factor
-        self.shift_factor = shift_factor
+        self.scale_factor = config.scale_factor
+        self.shift_factor = config.shift_factor
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         z = self.reg(self.encoder(x))
@@ -428,26 +427,31 @@ class AutoEncoder(nn.Module):
 
 class FluxModel(nn.Module):
     def __init__(self, config):
+        super().__init__()
         self.flow_model = Flux(config.flow).to(torch.bfloat16)
         if 'pretrained' in config.flow:
             checkpoint = safetensors.torch.load_file(config.flow.pretrained, device='cpu')
             missing, unexpected = self.flow_model.load_state_dict(checkpoint, strict=False, assign=True)
 
-        self.ae = AutoEncoder(**config.ae)
+        self.ae = AutoEncoder(config.ae)
         if 'pretrained' in config.ae:
             checkpoint = safetensors.torch.load_file(config.ae.pretrained, device='cpu')
-            missing, unexpected = self.flow_model.load_state_dict(checkpoint, strict=False, assign=True)
+            missing, unexpected = self.ae.load_state_dict(checkpoint, strict=False, assign=True)
 
         self.t5_tokenizer = T5Tokenizer.from_pretrained("google/t5-v1_1-xxl", max_length=128)
         self.t5_text_model = T5EncoderModel.from_preatrained("google/t5-v1_1-xxl", torch_dtype=torch.bfloat16)
         self.clip_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14", max_length=77)
         self.clip_text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.bfloat16)
 
+        self.flow_model.eval()
+        self.ae.eval()
+        self.ae.requires_grad_(False)
         self.t5_text_model.eval()
         self.t5_text_model.requires_grad_(False)
         self.clip_text_model.eval()
         self.clip_text_model.requires_grad_(False)
     
+    @torch.inference_mode()
     def sample(
         self, img: torch.Tensor, img_ids: torch.Tensor, txt: torch.Tensor, txt_ids: torch.Tensor,
         vec: torch.Tensor, timesteps: list[float], guidance: float = 4.0
@@ -469,7 +473,8 @@ class FluxModel(nn.Module):
             return_tensors='pt'
         )
         input_ids = tokens_out.input_ids
-        outputs = self.t5_text_model(input_ids.to(self.device), attention_mask=None, output_hidden_states=False)
+        input_ids = input_ids.to(next(self.t5_text_model.parameters()).device)
+        outputs = self.t5_text_model(input_ids, attention_mask=None, output_hidden_states=False)
         t5_emb = outputs['last_hidden_state']
         txt_ids = torch.zeros(t5_emb.size(0), t5_emb.size(1), 3, device=t5_emb.device)
 
@@ -481,7 +486,8 @@ class FluxModel(nn.Module):
             return_tensors='pt'
         )
         input_ids = tokens_out['input_ids']
-        outputs = self.clip_text_model(input_ids.to(self.device), attention_mask=None, output_hidden_states=False)
+        input_ids = input_ids.to(next(self.clip_text_model.parameters()).device)
+        outputs = self.clip_text_model(input_ids, attention_mask=None, output_hidden_states=False)
         clip_emb = outputs['pooler_output']
 
         return t5_emb, txt_ids, clip_emb
