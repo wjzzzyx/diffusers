@@ -1,9 +1,11 @@
 from abc import abstractmethod
 import einops
 import logging
+import lightning
 import math
 import numpy as np
 from packaging import version
+from PIL import Image
 import safetensors
 import torch
 import torch.nn as nn
@@ -61,6 +63,8 @@ _ATTN_PRECISION = os.environ.get("ATTN_PRECISION", "fp32")
 import utils
 import torch_utils
 from diffusers.model.vae import DiagonalGaussianDistribution
+from diffusers.model import ema
+from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
 from torch_utils import replace_substring_in_state_dict_if_present
 
 
@@ -1241,3 +1245,72 @@ class StableDiffusion_CondImagingEmb(StableDiffusion_StabilityAI):
         xt = torch.cat((xt, cond_imaging), dim=1)
         output = self.diffusion_model(xt, t, context=cond_prompt, y=cond_emb)
         return output
+
+
+class PLBase(lightning.LightningModule):
+    def __init__(
+        self,
+        model_config,
+        loss_config = None,
+        optimizer_config = None,
+        sampler_config = None,
+        ema_config = None,
+    ):
+        super().__init__()
+        self.model_config = model_config
+        self.optimizer_config = optimizer_config
+
+        self.model = StableDiffusion_StabilityAI(model_config)
+        if loss_config:
+            self.loss_fn = utils.instantiate_from_config(loss_config)
+        if sampler_config:
+            self.sampler = utils.instantiate_from_config(sampler_config)
+            alphas_cumprod = self.sampler.alphas_cumprod
+            if model_config.prediction_type == 'epsilon':
+                denoiser = KarrasEpsDenoiser(self.model, alphas_cumprod)
+            elif model_config.prediction_type == 'v':
+                denoiser = KarrasVDenoiser(self.model, alphas_cumprod)
+            self.denoiser = KarrasCFGDenoiser(denoiser, 7)
+        if ema_config:
+            self.model_ema = StableDiffusion_StabilityAI(model_config)
+            self.model_ema.require_grad_(False)
+            self.ema_helper = ema.EMAHelper(
+                max_decay=ema_config.max_decay,
+                use_ema_warmup=ema_config.warmup,
+                inv_gamma=ema_config.inv_gamma,
+                power=ema_config.power,
+            )
+    
+    def predict_step(self, batch, batch_idx):
+        batch_size = len(batch['prompt'])
+        width, height = batch['image_size'][0]
+        cond_pos_prompt = batch['prompt']
+        cond_neg_prompt = [''] * batch_size
+        cond_pos_prompt = self.model.get_learned_conditioning(cond_pos_prompt)
+        cond_neg_prompt = self.model.get_learned_conditioning(cond_neg_prompt)
+        denoiser_args = {'cond_pos_prompt': cond_pos_prompt, 'cond_neg_prompt': cond_neg_prompt}
+        samples = self.sampler.sample(
+            self.denoiser, batch_size=batch_size, image_shape=(4, width // 8, height // 8),
+            denoiser_args=denoiser_args
+        )
+        samples = self.model.decode_first_stage(samples)
+        samples = torch.clamp((samples + 1) / 2, min=0, max=1)
+        log_image_dict = {'image': samples}
+        log_keys=['image']
+        self.log_image(log_image_dict, log_keys, batch_idx, mode='predict')
+    
+    @torch.no_grad()
+    def log_image(self, batch, batch_keys, batch_idx, mode):
+        """
+        Args:
+            batch: dictionary, key: str -> value: tensor
+        """
+        dirname = os.path.join(self.trainer.default_root_dir, 'log_images', mode)
+        os.makedirs(dirname, exist_ok=True)
+        for key in batch_keys:
+            image_t = batch[key].permute(0, 2, 3, 1).squeeze(-1)
+            image_np = image_t.detach().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            for i in range(image_np.shape[0]):
+                filename = f'gs-{self.global_step:04}_e-{self.current_epoch:04}_b-{batch_idx:04}-{i:02}_{key}.png'
+                Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))

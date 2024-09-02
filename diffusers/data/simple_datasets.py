@@ -30,3 +30,27 @@ class ImageFolder(Dataset):
         image = TF.pil_to_tensor(image)
         image = image.float() / 255
         return {'image': image, 'fname': self.fnames[index]}
+
+
+class FixedPrompts(Dataset):
+    def __init__(self, image_size):
+        self.prompts = [
+            'a laptop on the chair',
+            'a dog to the left of a cat',
+            'a dog to the right of an elephant',
+            'a bycicle leaning to a tree',
+            'a man holding a picture',
+            'a man holding a picture using the left hand',
+            'a man holding a picture up using two hands'
+        ]
+        self.image_size = image_size
+    
+    def __len__(self):
+        return len(self.prompts) * 4
+
+    def __getitem__(self, index):
+        prompt = self.prompts[index // 4]
+        return {
+            'prompt': prompt,
+            'image_size': self.image_size,
+        }
