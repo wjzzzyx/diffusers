@@ -1283,9 +1283,9 @@ class PLBase(lightning.LightningModule):
     
     def predict_step(self, batch, batch_idx):
         batch_size = len(batch['prompt'])
-        width, height = batch['image_size'][0]
+        width, height = batch['width'][0], batch['height'][0]
         cond_pos_prompt = batch['prompt']
-        cond_neg_prompt = [''] * batch_size
+        cond_neg_prompt = batch['neg_prompt']
         cond_pos_prompt = self.model.get_learned_conditioning(cond_pos_prompt)
         cond_neg_prompt = self.model.get_learned_conditioning(cond_neg_prompt)
         denoiser_args = {'cond_pos_prompt': cond_pos_prompt, 'cond_neg_prompt': cond_neg_prompt}

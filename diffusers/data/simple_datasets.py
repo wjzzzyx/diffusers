@@ -33,7 +33,7 @@ class ImageFolder(Dataset):
 
 
 class FixedPrompts(Dataset):
-    def __init__(self, image_size):
+    def __init__(self, image_size, samples_per_prompt):
         self.prompts = [
             'a laptop on the chair',
             'a dog to the left of a cat',
@@ -44,13 +44,16 @@ class FixedPrompts(Dataset):
             'a man holding a picture up using two hands'
         ]
         self.image_size = image_size
+        self.samples_per_prompt = samples_per_prompt
     
     def __len__(self):
-        return len(self.prompts) * 4
+        return len(self.prompts) * self.samples_per_prompt
 
     def __getitem__(self, index):
-        prompt = self.prompts[index // 4]
+        prompt = self.prompts[index // self.samples_per_prompt]
         return {
             'prompt': prompt,
-            'image_size': self.image_size,
+            'neg_prompt': '',
+            'width': self.image_size[0],
+            'height': self.image_size[1]
         }
