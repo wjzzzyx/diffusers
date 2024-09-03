@@ -1,6 +1,10 @@
 from dataclasses import dataclass
-from einops import rearrange
+import einops
+import lightning
 import math
+import numpy as np
+import os
+from PIL import Image
 import safetensors
 import torch
 import torch.nn as nn
@@ -8,6 +12,8 @@ from transformers import CLIPTokenizer, CLIPTextModel, T5Tokenizer, T5EncoderMod
 from typing import Union
 
 from .vae import Encoder, Decoder
+from diffusers.model import ema
+import utils
 
 
 def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
@@ -16,7 +22,7 @@ def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
     omega = 1.0 / (theta**scale)
     out = torch.einsum("...n,d->...nd", pos, omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    out = einops.rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
     return out.float()
 
 
@@ -108,7 +114,7 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pe: torch.Tenso
     q, k = apply_rope(q, k, pe)
 
     x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-    x = rearrange(x, "B H L D -> B L (H D)")
+    x = einops.rearrange(x, "B H L D -> B L (H D)")
 
     return x
 
@@ -125,7 +131,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         qkv = self.qkv(x)
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = einops.rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         x = attention(q, k, v, pe=pe)
         x = self.proj(x)
@@ -192,14 +198,14 @@ class DoubleStreamBlock(nn.Module):
         img_modulated = self.img_norm1(img)
         img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        img_q, img_k, img_v = einops.rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        txt_q, txt_k, txt_v = einops.rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
@@ -258,7 +264,7 @@ class SingleStreamBlock(nn.Module):
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = einops.rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
 
         # compute attention
@@ -514,3 +520,91 @@ class FluxModel(nn.Module):
             timesteps = math.exp(mu) / (math.exp(mu) + (1 / timesteps - 1) ** 1.0)
         
         return timesteps.tolist()
+
+
+class PLBase(lightning.LightningModule):
+    def __init__(
+        self,
+        model_config,
+        loss_config = None,
+        optimizer_config = None,
+        sampler_config = None,
+        ema_config = None,
+    ):
+        super().__init__()
+        self.model_config = model_config
+        self.optimizer_config = optimizer_config
+        self.sampler_config = sampler_config
+
+        self.model = FluxModel(model_config)
+        if loss_config:
+            self.loss_fn = utils.instantiate_from_config(loss_config)
+        if ema_config:
+            self.model_ema = FluxModel(model_config)
+            self.model_ema.require_grad_(False)
+            self.ema_helper = ema.EMAHelper(
+                max_decay=ema_config.max_decay,
+                use_ema_warmup=ema_config.warmup,
+                inv_gamma=ema_config.inv_gamma,
+                power=ema_config.power,
+            )
+    
+    def predict_step(self, batch, batch_idx):
+        batch_size = len(batch['prompt'])
+        width, height = batch['width'][0], batch['height'][0]
+        image = torch.randn(
+            batch_size, 16, 2 * height // 16, 2 * width // 16,
+            dtype=torch.bfloat16, device=self.device,
+            generator=torch.Generator(device=self.device)
+        )
+        c, h, w = image.shape[1:]
+        image = einops.rearrange(image, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+        img_ids = torch.zeros(h // 2, w // 2, 3, device=self.device)
+        img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
+        img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+        img_ids = einops.repeat(img_ids, "h w c -> b (h w) c", b=batch_size)
+
+        self.model.t5_text_model.to(self.device)
+        self.model.clip_text_model.to(self.device)
+        txt, txt_ids, vec = self.model.forward_text_model(batch['prompt'])
+        self.model.t5_text_model.cpu()
+        self.model.clip_text_model.cpu()
+        torch.cuda.empty_cache()
+
+        timesteps = self.model.get_schedule(
+            self.sampler_config.num_steps, image.size(1),
+            shift=self.sampler_config.shift_schedule
+        )
+
+        self.model.flow_model.to(self.device)
+        image = self.model.sample(image, img_ids, txt, txt_ids, vec, timesteps, self.sampler_config.guidance)
+        self.model.flow_model.cpu()
+        torch.cuda.empty_cache()
+
+        image = image.float()
+        image = einops.rearrange(image, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=height // 16, w=width // 16, ph=2, pw=2)
+        self.model.ae.to(self.device)
+        image = self.model.ae.decode(image)
+        self.model.ae.cpu()
+
+        image = image.clamp(-1, 1)
+        image = (image + 1) / 2 * 255
+        log_image_dict = {'image': image}
+        log_keys=['image']
+        self.log_image(log_image_dict, log_keys, batch_idx, mode='predict')
+    
+    @torch.no_grad()
+    def log_image(self, batch, batch_keys, batch_idx, mode):
+        """
+        Args:
+            batch: dictionary, key: str -> value: tensor
+        """
+        dirname = os.path.join(self.trainer.default_root_dir, 'log_images', mode)
+        os.makedirs(dirname, exist_ok=True)
+        for key in batch_keys:
+            image_t = batch[key].permute(0, 2, 3, 1).squeeze(-1)
+            image_np = image_t.detach().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            for i in range(image_np.shape[0]):
+                filename = f'gs-{self.global_step:04}_e-{self.current_epoch:04}_b-{batch_idx:04}-{i:02}_{key}.png'
+                Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))
