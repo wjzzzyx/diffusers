@@ -445,7 +445,7 @@ class FluxModel(nn.Module):
             missing, unexpected = self.ae.load_state_dict(checkpoint, strict=False, assign=True)
 
         self.t5_tokenizer = T5Tokenizer.from_pretrained("google/t5-v1_1-xxl", max_length=128)
-        self.t5_text_model = T5EncoderModel.from_preatrained("google/t5-v1_1-xxl", torch_dtype=torch.bfloat16)
+        self.t5_text_model = T5EncoderModel.from_pretrained("google/t5-v1_1-xxl", torch_dtype=torch.bfloat16)
         self.clip_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14", max_length=77)
         self.clip_text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.bfloat16)
 
@@ -554,18 +554,19 @@ class PLBase(lightning.LightningModule):
         width, height = batch['width'][0], batch['height'][0]
         image = torch.randn(
             batch_size, 16, 2 * height // 16, 2 * width // 16,
-            dtype=torch.bfloat16, device=self.device,
-            generator=torch.Generator(device=self.device)
-        )
+            dtype=torch.bfloat16,
+            generator=torch.Generator()
+        ).cuda(self.local_rank)
         c, h, w = image.shape[1:]
         image = einops.rearrange(image, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
-        img_ids = torch.zeros(h // 2, w // 2, 3, device=self.device)
+        img_ids = torch.zeros(h // 2, w // 2, 3)
         img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
         img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
         img_ids = einops.repeat(img_ids, "h w c -> b (h w) c", b=batch_size)
+        img_ids = img_ids.cuda(self.local_rank)
 
-        self.model.t5_text_model.to(self.device)
-        self.model.clip_text_model.to(self.device)
+        self.model.t5_text_model.to(self.local_rank)
+        self.model.clip_text_model.to(self.local_rank)
         txt, txt_ids, vec = self.model.forward_text_model(batch['prompt'])
         self.model.t5_text_model.cpu()
         self.model.clip_text_model.cpu()
@@ -576,19 +577,19 @@ class PLBase(lightning.LightningModule):
             shift=self.sampler_config.shift_schedule
         )
 
-        self.model.flow_model.to(self.device)
+        self.model.flow_model.cuda(self.local_rank)
         image = self.model.sample(image, img_ids, txt, txt_ids, vec, timesteps, self.sampler_config.guidance)
         self.model.flow_model.cpu()
         torch.cuda.empty_cache()
 
         image = image.float()
         image = einops.rearrange(image, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=height // 16, w=width // 16, ph=2, pw=2)
-        self.model.ae.to(self.device)
+        self.model.ae.cuda(self.local_rank)
         image = self.model.ae.decode(image)
         self.model.ae.cpu()
 
         image = image.clamp(-1, 1)
-        image = (image + 1) / 2 * 255
+        image = (image + 1) / 2
         log_image_dict = {'image': image}
         log_keys=['image']
         self.log_image(log_image_dict, log_keys, batch_idx, mode='predict')

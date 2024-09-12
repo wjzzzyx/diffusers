@@ -33,4 +33,13 @@ model:
 
     sampler_config:
       num_steps: 20
+      shift_schedule: False
       guidance: 3.5
+
+data:
+  predict_batch_size: 4
+  num_workers: 0
+  predict:
+    target: diffusers.data.simple_datasets.FixedPrompts
+    params:
+      image_size: [512, 512]
