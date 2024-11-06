@@ -1,4 +1,8 @@
+import lightning
 import math
+import numpy as np
+import os
+from PIL import Image
 import re
 import safetensors
 import torch
@@ -8,6 +12,7 @@ import torch.nn.functional as F
 import utils
 from torch_utils import replace_substring_in_state_dict_if_present
 from diffusers.model.stable_diffusion_stabilityai import StableDiffusion_StabilityAI
+from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
 
 suffix_conversion = {
     'conv1': 'in_layers_2',
@@ -231,4 +236,122 @@ class StableDiffusion_Lora(StableDiffusion_StabilityAI):
                 model_config.dropout_module, model_config.dropout, model_config.dropout_rank
             )
             self.lora_networks.append(network)
+        
+        self.first_stage_model.eval()
+        self.first_stage_model.requires_grad_(False)
+        self.cond_stage_model.eval()
+        self.cond_stage_model.requires_grad_(False)
+        self.diffusion_model.eval()
+        self.diffusion_model.requires_grad_(False)
     
+    def trainable_parameters(self):
+        return self.lora_networks.parameters()
+
+
+class PLBase(lightning.LightningModule):
+    def __init__(
+        self,
+        model_config,
+        loss_config,
+        optimizer_config,
+        metric_config,
+        sampler_config,
+    ):
+        super().__init__()
+        self.model_config = model_config
+        self.loss_config = loss_config
+        self.optimizer_config = optimizer_config
+        self.metric_config = metric_config
+        self.sampler_config = sampler_config
+
+        self.model = StableDiffusion_Lora(model_config)
+        self.loss_fn = utils.instantiate_from_config(loss_config)
+        self.sampler = utils.instantiate_from_config(sampler_config)
+    
+    def training_step(self, batch, batch_idx):
+        batch_size = batch['images'].size(0)
+        time = torch.randint(0, self.sampler.num_train_steps, (batch_size,), device=self.device)
+        batch['time'] = time
+        latents = self.model.encode_first_stage(batch['images'])
+        cond_prompt = self.model.cond_stage_model(batch['captions'])
+
+        noise = torch.randn_like(latents)
+        alphas_cumprod = self.sampler.alphas_cumprod.to(self.device)
+        alphas_cumprod_t = alphas_cumprod[time][..., None, None, None]
+        xt = torch.sqrt(alphas_cumprod_t) * latents + torch.sqrt(1 - alphas_cumprod_t) * noise
+        output = self.model.diffusion_model(xt, time, cond_prompt)
+
+        loss, logdict = self.loss_fn(output, noise, batch)
+        logdict = {f'train/{k}': v for k, v in logdict.items()}
+        self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=batch_size)
+
+        pred = (xt - torch.sqrt(1 - alphas_cumprod_t) * output) / torch.sqrt(alphas_cumprod_t)
+        pred = self.model.decode_first_stage(pred)
+        pred = (pred + 1) / 2
+        log_image_dict = {'image': (batch['image'] + 1) / 2, 'pred': pred}
+        self.log_image(log_image_dict, ['image', 'pred'], batch_idx, mode='train')
+
+        return loss
+    
+    def validation_step(self, batch, batch_idx):
+        alphas_cumprod = self.sampler.alphas_cumprod.to(self.device)
+        if self.model.prediction_type == 'epsilon':
+            denoiser = KarrasEpsDenoiser(self.model, alphas_cumprod)
+        elif self.model.prediction_type == 'v':
+            denoiser = KarrasVDenoiser(self.model, alphas_cumprod)
+        denoiser = KarrasCFGDenoiser(denoiser, 7)
+
+        batch_size = len(batch['images'])
+        cond_pos_prompt = self.model.cond_stage_model(batch['captions'])
+        cond_neg_prompt = self.model.cond_stage_model(['' for _ in range(batch_size)])
+        denoiser_args = {'cond_pos_prompt': cond_pos_prompt, 'cond_neg_prompt': cond_neg_prompt}
+        samples = self.sampler.sample(
+            denoiser, batch_size=batch_size, image_shape=(4, 64, 64), denoiser_args=denoiser_args
+        )
+        samples = self.model.decode_first_stage(samples)
+        samples = torch.clamp((samples + 1) / 2, min=0, max=1)
+        log_image_dict = {'image': samples}
+        log_keys=['image']
+        self.log_image(log_image_dict, log_keys, batch_idx, mode='validation')
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['state_dict'] = {k: v for k, v in checkpoint['state_dict'].items() if k.startswith('model.lora_networks')}
+
+    def configure_optimizers(self):
+        trainable_params = self.model.trainable_parameters()
+        optimizer = utils.get_obj_from_str(self.optimizer_config.optimizer)(
+            trainable_params, **self.optimizer_config.optimizer_params
+        )
+        lr_scheduler = utils.get_obj_from_str(self.optimizer_config.lr_scheduler)(
+            optimizer, **self.optimizer_config.lr_scheduler_params
+        )
+        if self.optimizer_config.warmup:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=0.1, total_iters=self.optimizer_config.warmup
+            )
+            lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer, [warmup_scheduler, lr_scheduler], milestones=[self.optimizer_config.warmup]
+            )
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': lr_scheduler,
+                'interval': 'step'
+            }
+        }
+
+    @torch.no_grad()
+    def log_image(self, batch, keys, batch_idx, mode):
+        """
+        Args:
+            batch: dictionary, key: str -> value: tensor
+        """
+        dirname = os.path.join(self.trainer.default_root_dir, 'log_images', mode)
+        os.makedirs(dirname, exist_ok=True)
+        for key in keys:
+            image_t = batch[key].permute(0, 2, 3, 1).squeeze(-1)
+            image_np = image_t.detach().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            for i in range(image_np.shape[0]):
+                filename = f'gs-{self.global_step:04}_e-{self.current_epoch:04}_b-{batch_idx:04}-{i:02}_{key}.png'
+                Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))
