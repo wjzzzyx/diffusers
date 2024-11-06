@@ -301,7 +301,7 @@ class ControlNet(StableDiffusion_StabilityAI):
         self.diffusion_model.eval()
         self.diffusion_model.requires_grad_(False)
 
-        self.control_stage_model = ControlNetEncoder(model_config.control_stage_config)
+        self.control_stage_model = ControlNetEncoder(**model_config.control_stage_config)
         self.control_scales = [1.0] * (len(self.control_stage_model.input_blocks) + 1)
         if 'pretrained_cn' in model_config:
             if model_config.pretrained_cn.endswith('safetensors'):
