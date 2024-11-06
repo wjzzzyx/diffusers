@@ -17,11 +17,13 @@ import utils
 
 
 def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
+    """Computes the rotary matrix"""
     assert dim % 2 == 0
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / (theta**scale)
     out = torch.einsum("...n,d->...nd", pos, omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
+    # shape (batch, seq, dim // 2, 2, 2)
     out = einops.rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
     return out.float()
 
@@ -213,7 +215,7 @@ class DoubleStreamBlock(nn.Module):
         k = torch.cat((txt_k, img_k), dim=2)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe)    # shape (batch, seq, dim)
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img bloks
