@@ -18,7 +18,7 @@ class VisualGenomeDataset(Dataset):
         self.openai_clip_std = (0.26862954, 0.26130258, 0.27577711)
     
     def __len__(self):
-        return len(self.objects)
+        return len(self.all_objects)
 
     def __getitem__(self, index):
         objects = self.all_objects[index]
@@ -37,5 +37,5 @@ class VisualGenomeDataset(Dataset):
             maxhw - (maxhw - h) // 2
         )
         pad_value = tuple(int(x * 255) for x in self.openai_clip_mean)
-        image = TF.pad(pad_size, fill=pad_value)
+        image = TF.pad(image, pad_size, fill=pad_value)
         return image
