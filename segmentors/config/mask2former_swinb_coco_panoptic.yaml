@@ -1,0 +1,54 @@
+model:
+  backbone:
+    freeze_at: 0
+    name: build_resnet_backbone
+  weights: swin_base_patch4_window12_384_22k.pkl
+  pixel_mean: [123.675, 116.280, 103.530]
+  pixel_std: [58.395, 57.120, 57.375]
+  mask_former:
+    transformer_in_feature: multi_scale_pixel_decoder
+    deep_supervision: true
+    no_object_weight: 0.1
+    class_weight: 2.0
+    mask_weight: 5.0
+    dice_weight: 5.0
+    hidden_dim: 256
+    num_object_queries: 100
+    nheads: 8
+    dropout: 0.0
+    dim_feedforward: 2048
+    enc_layers: 0
+    pre_norm: False
+    enforce_input_proj: False
+    size_divisibility: 32
+    dec_layers: 10    # 9 decoder layers, add one for the loss on learnable query
+    train_num_points: 12544
+    oversample_ratio: 3.0
+    importance_sample_ratio: 0.75
+    test:
+      semantic_on: true
+      instance_on: true
+      panoptic_on: true
+      overlap_threshold: 0.8
+      object_mask_threshold: 0.8
+  sem_seg_head:
+    in_features: ["res2", "res3", "res4", "res5"]
+    ignore_value: 255
+    num_classes: 133
+    loss_weight: 1.0
+    convs_dim: 256
+    mask_dim: 256
+    norm: "GN"
+    # pixel decoder
+    deformable_transformer_encoder_in_features: ["res3", "res4", "res5"]
+    common_stride: 4
+    transformer_enc_layers: 6
+  swin:
+    embed_dim: 128
+    depths: [2, 2, 18, 2]
+    num_heads: [4, 8, 16, 32]
+    window_size: 12
+    ape: False
+    drop_path_rate: 0.3
+    patch_norm: true
+    pretrain_img_size: 384
