@@ -31,6 +31,7 @@ model:
       panoptic_on: true
       overlap_threshold: 0.8
       object_mask_threshold: 0.8
+      sem_seg_postprocessing_before_inference: False
   sem_seg_head:
     in_features: ["res2", "res3", "res4", "res5"]
     ignore_value: 255
@@ -49,6 +50,16 @@ model:
     num_heads: [4, 8, 16, 32]
     window_size: 12
     ape: False
-    drop_path_rate: 0.3
     patch_norm: true
     pretrain_img_size: 384
+    patch_size: 4
+    mlp_ratio: 4.0
+    qkv_bias: True
+    qk_scale: null
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.3
+    out_features: ["res2", "res3", "res4", "res5"]
+    use_checkpoint: False
+
+dataset_categories: segmentors.data.coco.COCO_CATEGORIES

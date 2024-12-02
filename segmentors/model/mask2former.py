@@ -681,7 +681,7 @@ class SwinTransformer(nn.Module):
 
 
 class D2SwinTransformer(SwinTransformer):
-    def __init__(self, cfg, input_shape):
+    def __init__(self, cfg):
 
         pretrain_img_size = cfg.model.swin.pretrain_img_size
         patch_size = cfg.model.swin.patch_size
@@ -1078,7 +1078,6 @@ class MSDeformAttnPixelDecoder(nn.Module):
             norm (str or callable): normalization for all conv layers
         """
         super().__init__()
-        input_shape = {k: v for k, v in input_shape.items() if k in config.model.sem_seg_head.in_features}
         conv_dim = config.model.sem_seg_head.convs_dim
         mask_dim = config.model.sem_seg_head.mask_dim
         norm = config.model.sem_seg_head.norm
@@ -1090,20 +1089,19 @@ class MSDeformAttnPixelDecoder(nn.Module):
         common_stride = config.model.sem_seg_head.common_stride
 
         transformer_input_shape = {
-            k: v for k, v in input_shape.items() if k in transformer_in_features
+            k: v for k, v in input_shape if k in transformer_in_features
         }
 
         # this is the input shape of pixel decoder
-        input_shape = sorted(input_shape.items(), key=lambda x: x[1].stride)
         self.in_features = [k for k, v in input_shape]  # starting from "res2" to "res5"
-        self.feature_strides = [v.stride for k, v in input_shape]
-        self.feature_channels = [v.channels for k, v in input_shape]
+        self.feature_strides = [v["stride"] for k, v in input_shape]
+        self.feature_channels = [v["channels"] for k, v in input_shape]
         
         # this is the input shape of transformer encoder (could use less features than pixel decoder
-        transformer_input_shape = sorted(transformer_input_shape.items(), key=lambda x: x[1].stride)
+        transformer_input_shape = sorted(transformer_input_shape.items(), key=lambda x: x[1]["stride"])
         self.transformer_in_features = [k for k, v in transformer_input_shape]  # starting from "res2" to "res5"
-        transformer_in_channels = [v.channels for k, v in transformer_input_shape]
-        self.transformer_feature_strides = [v.stride for k, v in transformer_input_shape]  # to decide extra FPN layers
+        transformer_in_channels = [v["channels"] for k, v in transformer_input_shape]
+        self.transformer_feature_strides = [v["stride"] for k, v in transformer_input_shape]  # to decide extra FPN layers
 
         self.transformer_num_feature_levels = len(self.transformer_in_features)
         if self.transformer_num_feature_levels > 1:
@@ -1178,9 +1176,11 @@ class MSDeformAttnPixelDecoder(nn.Module):
                 activation=F.relu,
             )
             nn.init.kaiming_uniform_(lateral_conv.weight, a=1)
-            nn.init.constant_(lateral_conv.bias, 0)
+            if lateral_conv.bias:
+                nn.init.constant_(lateral_conv.bias, 0)
             nn.init.kaiming_uniform_(output_conv.weight, a=1)
-            nn.init.constant_(output_conv.bias, 0)
+            if output_conv.bias:
+                nn.init.constant_(output_conv.bias, 0)
             self.add_module("adapter_{}".format(idx + 1), lateral_conv)
             self.add_module("layer_{}".format(idx + 1), output_conv)
 
@@ -1191,7 +1191,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
         self.lateral_convs = lateral_convs[::-1]
         self.output_convs = output_convs[::-1]
     
-    @torch.cuda.amp.autocast(enabled=False)
+    @torch.amp.autocast("cuda", enabled=False)
     def forward_features(self, features):
         srcs = []
         pos = []
@@ -1422,13 +1422,13 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         super().__init__()
         assert mask_classification, "Only support mask classification model"
         self.mask_classification = mask_classification
+        hidden_dim = config.model.mask_former.hidden_dim
 
         # positional encoding
         N_steps = hidden_dim // 2
         self.pe_layer = PositionEmbeddingSine(N_steps, normalize=True)
 
         num_classes = config.model.sem_seg_head.num_classes
-        hidden_dim = config.model.mask_former.hidden_dim
         self.num_queries = config.model.mask_former.num_object_queries
         # transformer parameters
         self.num_heads = config.model.mask_former.nheads
@@ -1615,18 +1615,15 @@ class MaskFormerHead(nn.Module):
             transformer_in_feature: input feature name to the transformer_predictor
         """
         super().__init__()
-        input_shape = sorted(input_shape.items(), key=lambda x: x[1].stride)
+        input_shape = {k: v for k, v in input_shape.items() if k in config.model.sem_seg_head.in_features}
+        input_shape = sorted(input_shape.items(), key=lambda x: x[1]["stride"])
         self.in_features = [k for k, v in input_shape]
-        feature_strides = [v.stride for k, v in input_shape]
-        feature_channels = [v.channels for k, v in input_shape]
 
         # self.ignore_value = config.model.sem_seg_head.ignore_value
         # self.common_stride = 4
         # self.loss_weight = config.model.seg_seg_head.loss_weight
         self.transformer_in_feature = config.model.mask_former.transformer_in_feature
-        # self.num_classes = config.model.sem_seg_head.num_classes
-
-        input_shape = {k: v for k, v in input_shape.items() if k in config.model.sem_seg_head.in_features}
+        self.num_classes = config.model.sem_seg_head.num_classes
         self.pixel_decoder = MSDeformAttnPixelDecoder(config, input_shape)
 
         if config.model.mask_former.transformer_in_feature == "transformer_encoder":
@@ -1636,7 +1633,7 @@ class MaskFormerHead(nn.Module):
         elif config.model.mask_former.transformer_in_feature == "multi_scale_pixel_decoder":  # for maskformer2
             transformer_predictor_in_channels = config.model.sem_seg_head.convs_dim
         else:
-            transformer_predictor_in_channels = input_shape[config.model.mask_former.transformer_in_feature].channels
+            transformer_predictor_in_channels = input_shape[config.model.mask_former.transformer_in_feature]["channels"]
         self.predictor = MultiScaleMaskedTransformerDecoder(config, transformer_predictor_in_channels, mask_classification=True)
 
     def forward(self, features, mask=None):
@@ -2232,7 +2229,7 @@ class MaskFormer(nn.Module):
         self.object_mask_threshold = config.model.mask_former.test.object_mask_threshold
         
         self.dataset_thing_id_to_contiguous_id = dict()
-        for i, cat in utils.get_object_from_string(config.dataset_categories):
+        for i, cat in enumerate(utils.get_obj_from_str(config.dataset_categories)):
             if cat["isthing"]:
                 self.dataset_thing_id_to_contiguous_id[cat["id"]] = i
 
@@ -2251,7 +2248,7 @@ class MaskFormer(nn.Module):
         self.semantic_on = config.model.mask_former.test.semantic_on
         self.instance_on = config.model.mask_former.test.instance_on
         self.panoptic_on = config.model.mask_former.test.panoptic_on
-        self.test_topk_per_image = config.test.detections_per_image
+        self.test_topk_per_image = 10
     
     @property
     def device(self):
@@ -2284,6 +2281,7 @@ class MaskFormer(nn.Module):
                         Each dict contains keys "id", "category_id", "isthing".
         """
         images = batch['image']
+        images = (images - self.pixel_mean) / self.pixel_std
         features = self.backbone(images)
         outputs = self.sem_seg_head(features)
 
@@ -2316,11 +2314,12 @@ class MaskFormer(nn.Module):
             del outputs
 
             processed_results = list()
-            for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
-                mask_cls_results, mask_pred_results, batch, images.image_sizes
+            image_sizes = [(im.shape[-2], im.shape[-1]) for im in images]
+            for mask_cls_result, mask_pred_result, height, width, image_size in zip(
+                mask_cls_results, mask_pred_results, batch["height"], batch["width"], image_sizes
             ):
-                height = input_per_image.get("height", image_size[0])
-                width = input_per_image.get("width", image_size[1])
+                # height = input_per_image.get("height", image_size[0])
+                # width = input_per_image.get("width", image_size[1])
                 processed_results.append({})
 
                 if self.sem_seg_postprocess_before_inference:
@@ -2337,7 +2336,7 @@ class MaskFormer(nn.Module):
                     panoptic_r = self.panoptic_inference(mask_cls_result, mask_pred_result)
                     processed_results[-1]["panoptic_seg"] = panoptic_r
                 
-                if self.inference_on:
+                if self.instance_on:
                     instance_r = self.instance_inference(mask_cls_result, mask_pred_result)
                     processed_results[-1]["instances"] = instance_r
             
