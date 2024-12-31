@@ -8,7 +8,7 @@ import os
 from PIL import Image
 
 import albumentations as A
-from albumentations import DualIAATransform, to_tuple
+# from albumentations import DualIAATransform, to_tuple
 import cv2
 import imgaug.augmenters as iaa
 import numpy as np
@@ -18,87 +18,87 @@ from torch.utils.data import Dataset
 LOGGER = logging.getLogger(__name__)
 
 
-class IAAAffine2(DualIAATransform):
-    """Place a regular grid of points on the input and randomly move the neighbourhood of these point around
-    via affine transformations.
+# class IAAAffine2(DualIAATransform):
+#     """Place a regular grid of points on the input and randomly move the neighbourhood of these point around
+#     via affine transformations.
 
-    Note: This class introduce interpolation artifacts to mask if it has values other than {0;1}
+#     Note: This class introduce interpolation artifacts to mask if it has values other than {0;1}
 
-    Args:
-        p (float): probability of applying the transform. Default: 0.5.
+#     Args:
+#         p (float): probability of applying the transform. Default: 0.5.
 
-    Targets:
-        image, mask
-    """
+#     Targets:
+#         image, mask
+#     """
 
-    def __init__(
-        self,
-        scale=(0.7, 1.3),
-        translate_percent=None,
-        translate_px=None,
-        rotate=0.0,
-        shear=(-0.1, 0.1),
-        order=1,
-        cval=0,
-        mode="reflect",
-        always_apply=False,
-        p=0.5,
-    ):
-        super(IAAAffine2, self).__init__(always_apply, p)
-        self.scale = dict(x=scale, y=scale)
-        self.translate_percent = to_tuple(translate_percent, 0)
-        self.translate_px = to_tuple(translate_px, 0)
-        self.rotate = to_tuple(rotate)
-        self.shear = dict(x=shear, y=shear)
-        self.order = order
-        self.cval = cval
-        self.mode = mode
+#     def __init__(
+#         self,
+#         scale=(0.7, 1.3),
+#         translate_percent=None,
+#         translate_px=None,
+#         rotate=0.0,
+#         shear=(-0.1, 0.1),
+#         order=1,
+#         cval=0,
+#         mode="reflect",
+#         always_apply=False,
+#         p=0.5,
+#     ):
+#         super(IAAAffine2, self).__init__(always_apply, p)
+#         self.scale = dict(x=scale, y=scale)
+#         self.translate_percent = to_tuple(translate_percent, 0)
+#         self.translate_px = to_tuple(translate_px, 0)
+#         self.rotate = to_tuple(rotate)
+#         self.shear = dict(x=shear, y=shear)
+#         self.order = order
+#         self.cval = cval
+#         self.mode = mode
 
-    @property
-    def processor(self):
-        return iaa.Affine(
-            self.scale,
-            self.translate_percent,
-            self.translate_px,
-            self.rotate,
-            self.shear,
-            self.order,
-            self.cval,
-            self.mode,
-        )
+#     @property
+#     def processor(self):
+#         return iaa.Affine(
+#             self.scale,
+#             self.translate_percent,
+#             self.translate_px,
+#             self.rotate,
+#             self.shear,
+#             self.order,
+#             self.cval,
+#             self.mode,
+#         )
 
-    def get_transform_init_args_names(self):
-        return ("scale", "translate_percent", "translate_px", "rotate", "shear", "order", "cval", "mode")
+#     def get_transform_init_args_names(self):
+#         return ("scale", "translate_percent", "translate_px", "rotate", "shear", "order", "cval", "mode")
 
 
-class IAAPerspective2(DualIAATransform):
-    """Perform a random four point perspective transform of the input.
+# class IAAPerspective2(DualIAATransform):
+#     """Perform a random four point perspective transform of the input.
 
-    Note: This class introduce interpolation artifacts to mask if it has values other than {0;1}
+#     Note: This class introduce interpolation artifacts to mask if it has values other than {0;1}
 
-    Args:
-        scale ((float, float): standard deviation of the normal distributions. These are used to sample
-            the random distances of the subimage's corners from the full image's corners. Default: (0.05, 0.1).
-        p (float): probability of applying the transform. Default: 0.5.
+#     Args:
+#         scale ((float, float): standard deviation of the normal distributions. These are used to sample
+#             the random distances of the subimage's corners from the full image's corners. Default: (0.05, 0.1).
+#         p (float): probability of applying the transform. Default: 0.5.
 
-    Targets:
-        image, mask
-    """
+#     Targets:
+#         image, mask
+#     """
 
-    def __init__(self, scale=(0.05, 0.1), keep_size=True, always_apply=False, p=0.5,
-                 order=1, cval=0, mode="replicate"):
-        super(IAAPerspective2, self).__init__(always_apply, p)
-        self.scale = to_tuple(scale, 1.0)
-        self.keep_size = keep_size
-        self.cval = cval
-        self.mode = mode
+#     def __init__(self, scale=(0.05, 0.1), keep_size=True, always_apply=False, p=0.5,
+#                  order=1, cval=0, mode="replicate"):
+#         super(IAAPerspective2, self).__init__(always_apply, p)
+#         self.scale = to_tuple(scale, 1.0)
+#         self.keep_size = keep_size
+#         self.cval = cval
+#         self.mode = mode
 
-    @property
-    def processor(self):
-        return iaa.PerspectiveTransform(self.scale, keep_size=self.keep_size, mode=self.mode, cval=self.cval)
+#     @property
+#     def processor(self):
+#         return iaa.PerspectiveTransform(self.scale, keep_size=self.keep_size, mode=self.mode, cval=self.cval)
 
-    def get_transform_init_args_names(self):
-        return ("scale", "keep_size")
+#     def get_transform_init_args_names(self):
+#         return ("scale", "keep_size")
 
 
 def get_transforms(transform_variant, out_size):
@@ -115,10 +115,12 @@ def get_transforms(transform_variant, out_size):
         ])
     elif transform_variant == 'distortions':
         transform = A.Compose([
-            IAAPerspective2(scale=(0.0, 0.06)),
-            IAAAffine2(scale=(0.7, 1.3),
-                       rotate=(-40, 40),
-                       shear=(-0.1, 0.1)),
+            # IAAPerspective2(scale=(0.0, 0.06)),
+            # IAAAffine2(scale=(0.7, 1.3),
+            #            rotate=(-40, 40),
+            #            shear=(-0.1, 0.1)),
+            A.Perspective(scale=(0.0, 0.06)),
+            A.Affine(scale=(0.7, 1.3), rotate=(-40, 40), shear=(-0.1, 0.1)),
             A.PadIfNeeded(min_height=out_size, min_width=out_size),
             A.OpticalDistortion(),
             A.RandomCrop(height=out_size, width=out_size),
@@ -581,4 +583,5 @@ class InpaintingEvaluationDataset(Dataset):
             result['image'] = pad_img_to_modulo(result['image'], self.pad_out_to_modulo)
             result['mask'] = pad_img_to_modulo(result['mask'], self.pad_out_to_modulo)
 
+        result['fname'] = self.img_filenames[i]
         return result

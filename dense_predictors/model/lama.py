@@ -1,13 +1,16 @@
 from abc import abstractmethod, ABC
 from collections import namedtuple, OrderedDict
+import colorsys
 import cv2
 from kornia.geometry.transform import rotate
 import lightning
 import logging
 import math
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import os
 import pandas as pd
+from PIL import Image
 import scipy.ndimage
 import skimage.color
 import skimage.segmentation
@@ -18,7 +21,7 @@ import torchvision
 from typing import List, Tuple, Dict, Optional
 import warnings
 
-from classifiers.model import mobilenet
+# from classifiers.model import mobilenet
 
 LOGGER = logging.getLogger(__name__)
 
@@ -573,7 +576,7 @@ class NonSaturatingWithR1(BaseAdversarialLoss):
                 pixel_weights = 1 + mask * self.extra_mask_weight_for_gen
                 fake_loss = fake_loss * pixel_weights
 
-        return fake_loss.mean() * self.weight, dict()
+        return fake_loss.mean() * self.weight
 
     def pre_discriminator_step(self, real_batch: torch.Tensor, fake_batch: torch.Tensor,
                                generator: nn.Module, discriminator: nn.Module):
@@ -944,7 +947,7 @@ class ModelBuilder:
 
     @staticmethod
     def build_decoder(arch='ppm_deepsup',
-                      fc_dim=512, num_class=NUM_CLASS,
+                      fc_dim=512, num_class=150,
                       weights='', use_softmax=False, drop_last_conv=False):
         arch = arch.lower()
         if arch == 'ppm_deepsup':
@@ -991,11 +994,14 @@ class ResNetPL(nn.Module):
     def __init__(self, weight=1,
                  weights_path=None, arch_encoder='resnet50dilated', segmentation=True):
         super().__init__()
-        self.impl = ModelBuilder.get_encoder(weights_path=weights_path,
-                                             arch_encoder=arch_encoder,
-                                             arch_decoder='ppm_deepsup',
-                                             fc_dim=2048,
-                                             segmentation=segmentation)
+        # self.impl = ModelBuilder.get_encoder(weights_path=weights_path,
+        #                                      arch_encoder=arch_encoder,
+        #                                      arch_decoder='ppm_deepsup',
+        #                                      fc_dim=2048,
+        #                                      segmentation=segmentation)
+        self.impl = ModelBuilder.build_encoder(
+            arch=arch_encoder, fc_dim=2048, weights=weights_path
+        )
         self.impl.eval()
         for w in self.impl.parameters():
             w.requires_grad_(False)
@@ -1011,7 +1017,7 @@ class ResNetPL(nn.Module):
 
         result = torch.stack([F.mse_loss(cur_pred, cur_target)
                               for cur_pred, cur_target
-                              in zip(pred_feats, target_feats)]).sum() * self.weight
+                              in zip(pred_feats, target_feats)]).sum()
         return result
 
 
@@ -1946,7 +1952,7 @@ def fid_inception_v3():
 
     LOGGER.info('fid_inception_v3 patching done')
 
-    state_dict = torchvision.model.utils.load_state_dict_from_url(FID_WEIGHTS_URL, progress=True)
+    state_dict = torch.hub.load_state_dict_from_url(FID_WEIGHTS_URL, progress=True)
     LOGGER.info('fid_inception_v3 weights downloaded')
 
     inception.load_state_dict(state_dict)
@@ -2205,14 +2211,14 @@ class FIDScore(EvaluatorScore):
         return activations
 
 
-def make_evaluator(kind='default', ssim=True, lpips=True, fid=True, integral_kind=None, **kwargs):
+def make_evaluator(kind='default', ssim=True, lpips=True, fid=True, integral_kind=None, lpips_model_path=None, **kwargs):
     logging.info(f'Make evaluator {kind}')
     device = "cuda" if torch.cuda.is_available() else "cpu"
     metrics = {}
     if ssim:
         metrics['ssim'] = SSIMScore()
     if lpips:
-        metrics['lpips'] = LPIPSScore()
+        metrics['lpips'] = LPIPSScore(model_path=lpips_model_path)
     if fid:
         metrics['fid'] = FIDScore().to(device)
         
@@ -2232,6 +2238,19 @@ def make_evaluator(kind='default', ssim=True, lpips=True, fid=True, integral_kin
                                          **kwargs)
 
 
+def flatten_dict(dct):
+    result = {}
+    for k, v in dct.items():
+        if isinstance(k, tuple):
+            k = "_".join(k)
+        if isinstance(v, dict):
+            for sub_k, sub_v in flatten_dict(v).items():
+                result[f"{k}_{sub_k}"] = sub_v
+        else:
+            result[k] = v
+    return result
+
+
 class PLBase(lightning.LightningModule):
     def __init__(self, model_config, loss_config, optimizer_config):
         super().__init__()
@@ -2243,19 +2262,18 @@ class PLBase(lightning.LightningModule):
         self.generator = FFCResNetGenerator(**model_config.generator)
         self.discriminator = NLayerDiscriminator(**model_config.discriminator)
         self.loss_adv_fn = NonSaturatingWithR1(**loss_config.adversarial)
-        self.loss_l1_fn = nn.L1Loss(reduction='none')
         self.loss_resnet_perceptual_fn = ResNetPL(**loss_config.resnet_pl)
 
         self.val_evaluator = make_evaluator(**model_config.evaluator)
         self.test_evaluator = make_evaluator(**model_config.evaluator)
+        self.val_evaluator.requires_grad_(False)
+        self.test_evaluator.requires_grad_(False)
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
-        if optimizer_idx == 0:    # train generator
-            self.generator.requires_grad_(True)
-            self.discriminator.requires_grad_(False)
-        else:
-            self.generator.requires_grad_(False)
-            self.discriminator.requires_grad_(True)
+        self.automatic_optimization = False
+        self.val_step_outputs = [[], []]
+
+    def training_step(self, batch, batch_idx):
+        optimizer_g, optimizer_d = self.optimizers()
         
         image = batch['image']
         mask = batch['mask']
@@ -2264,41 +2282,67 @@ class PLBase(lightning.LightningModule):
         output = self.generator(image_in)
         inpainted = masked_image + output * mask
 
-        if optimizer_idx == 0:
-            loss, logdict = self.generator_loss(image, mask, output)
-        else:
-            loss, logdict = self.discriminator_loss(image, mask, output)
+        # optimize generator
+        loss, logdict_g = self.generator_loss(image, mask, output)
+        optimizer_g.zero_grad()
+        self.manual_backward(loss)
+        self.clip_gradient(optimizer_g, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        optimizer_g.step()
+
+        # optimize discriminator
+        output = self.generator(image_in)
+        loss, logdict_d = self.discriminator_loss(image, mask, output.detach())
+        optimizer_d.zero_grad()
+        self.manual_backward(loss)
+        self.clip_gradients(optimizer_d, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+        optimizer_d.step()
+        
+        logdict = logdict_d | logdict_g
         logdict = {f'train/{k}': v for k, v in logdict.items()}
-        self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=image.size(0))
+        self.log_dict(logdict, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=image.size(0), sync_dist=True)
         
         if self.global_step % 1000 == 0 and self.global_rank == 0:
-            self.log_image(batch, batch_idx, mode='train')
+            with torch.inference_mode():
+                discr_output_real, _ = self.discriminator(image)
+                discr_output_fake, _ = self.discriminator(output)
+                image_size = image.shape[2:]
+                discr_output_real = F.interpolate(discr_output_real, size=image_size, mode="nearest")
+                discr_output_fake = F.interpolate(discr_output_fake, size=image_size, mode="nearest")
+            log_image_dict = {
+                "image": image,
+                "mask": mask,
+                "predicted_image": output,
+                "discr_output_fake": discr_output_fake,
+                "discr_output_real": discr_output_real,
+                "inpainted": inpainted,
+            }
+            self.log_image(log_image_dict, batch_idx, mode='train')
 
         return loss
 
     def generator_loss(self, image, mask, output):
         per_pixel_l1 = F.l1_loss(output, image, reduction='none')
-        pixel_weights = mask * self.loss_config.l1_weight_missing + (1 - mask) * self.loss_config.l1_weight_known
+        pixel_weights = mask * self.loss_config.l1.weight_missing + (1 - mask) * self.loss_config.l1.weight_known
         loss_l1 = (pixel_weights * per_pixel_l1).mean()
 
-        # self.loss_adv_fn.pre_generator_step(
-        #     real_batch=image, fake_batch=output, generator=self.generator, discriminator=self.discriminator
-        # )
         discr_real_pred, discr_real_features = self.discriminator(image)
         discr_fake_pred, discr_fake_features = self.discriminator(output)
-        loss_g = self.loss_adv_fn.generator_loss(
-            real_batch=image, fake_batch=output, discr_real_pred=discr_real_pred, discr_fake_pred=discr_fake_pred,
-            mask=mask
-        )
+        loss_g = F.softplus(-discr_fake_pred)
+        loss_g = loss_g.mean() * self.loss_config.adversarial.weight
+        # loss_g = self.loss_adv_fn.generator_loss(
+        #     real_batch=image, fake_batch=output, discr_real_pred=discr_real_pred, discr_fake_pred=discr_fake_pred,
+        #     mask=mask
+        # )
         loss = loss_l1 + loss_g
 
-        if self.loss_config.feature_matching_weight > 0:
+        if self.loss_config.feature_matching.weight > 0:
             loss_fm = self.feature_matching_loss(discr_fake_features, discr_real_features, mask=None)
-            loss_fm = loss_fm * self.loss_config.feature_matching_weight
+            loss_fm = loss_fm * self.loss_config.feature_matching.weight
             loss = loss + loss_fm
         
-        if self.loss_config.resnet_pl_weight > 0:
+        if self.loss_config.resnet_pl.weight > 0:
             loss_resnet_pl = self.loss_resnet_perceptual_fn(output, image)
+            loss_resnet_pl = loss_resnet_pl * self.loss_config.resnet_pl.weight
             loss = loss + loss_resnet_pl
         
         logdict = {
@@ -2309,7 +2353,7 @@ class PLBase(lightning.LightningModule):
         }
         return loss, logdict
 
-    def feature_matching_loss(fake_features: List[torch.Tensor], target_features: List[torch.Tensor], mask=None):
+    def feature_matching_loss(self, fake_features: List[torch.Tensor], target_features: List[torch.Tensor], mask=None):
         if mask is None:
             res = torch.stack([F.mse_loss(fake_feat, target_feat)
                             for fake_feat, target_feat in zip(fake_features, target_features)]).mean()
@@ -2326,14 +2370,12 @@ class PLBase(lightning.LightningModule):
         return res
     
     def discriminator_loss(self, image, mask, output):
-        output = output.detach()
         image.requires_grad = True    # ?
         discr_real_pred, discr_real_features = self.discriminator(image)
         discr_fake_pred, discr_fake_features = self.discriminator(output)
         loss_d, logdict = self.loss_adv_fn.discriminator_loss(
             real_batch=image, fake_batch=output, discr_real_pred=discr_real_pred, discr_fake_pred=discr_fake_pred, mask=mask
         )
-        logdict = {f'adv_{k}': v for k, v in logdict.items()}
         logdict['loss_d'] = loss_d.item()
         return loss_d, logdict
 
@@ -2344,6 +2386,8 @@ class PLBase(lightning.LightningModule):
         image_in = torch.cat([masked_image, batch['mask']], dim=1)
         output = self.generator(image_in)
         inpainted = masked_image + output * mask
+        batch["predicted_image"] = output.detach()
+        batch["inpainted"] = inpainted.detach()
 
         loss_g, logdict1 = self.generator_loss(image, mask, output)
         loss_d, logdict2 = self.discriminator_loss(image, mask, output)
@@ -2352,19 +2396,34 @@ class PLBase(lightning.LightningModule):
             logdict = {f'val/{k}': v for k, v in logdict.items()}
         else:
             logdict = {f'test/{k}': v for k, v in logdict.items()}
-        self.log_dict(logdict, prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=image.size(0))
+        self.log_dict(logdict, prog_bar=True, logger=True, on_step=False, on_epoch=True, batch_size=image.size(0), sync_dist=True, add_dataloader_idx=False)
         
         if batch_idx % 100 == 0 and self.global_rank == 0:
-            self.log_image(batch, batch_idx, mode='val')
+            with torch.inference_mode():
+                discr_output_real, _ = self.discriminator(image)
+                discr_output_fake, _ = self.discriminator(output)
+                image_size = image.shape[2:]
+                discr_output_real = F.interpolate(discr_output_real, size=image_size, mode="nearest")
+                discr_output_fake = F.interpolate(discr_output_fake, size=image_size, mode="nearest")
+            log_image_dict = {
+                "image": image,
+                "mask": mask,
+                "predicted_image": output,
+                "discr_output_fake": discr_output_fake,
+                "discr_output_real": discr_output_real,
+                "inpainted": inpainted,
+            }
+            self.log_image(log_image_dict, batch_idx, mode='val')
         
         if dataloader_idx == 0:
-            logdict['val/evaluator_state'] = self.val_evaluator.process_batch(batch)
+            logdict['val/evaluator_state'] = self.val_evaluator(batch)
         elif dataloader_idx == 1:
-            logdict['test/evaluator_state'] = self.test_evaluator.process_batch(batch)
+            logdict['test/evaluator_state'] = self.test_evaluator(batch)
+        self.val_step_outputs[dataloader_idx].append(logdict)
         return logdict
 
-    def validation_epoch_end(self, outputs):
-        outputs = [step_out for out_group in outputs for step_out in out_group]
+    def on_validation_epoch_end(self):
+        outputs = [step_out for out_group in self.val_step_outputs for step_out in out_group]
 
         pd.set_option('display.max_columns', 500)
         pd.set_option('display.width', 1000)
@@ -2375,8 +2434,8 @@ class PLBase(lightning.LightningModule):
         val_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
         LOGGER.info(f'Validation metrics after epoch #{self.current_epoch}, '
                     f'total {self.global_step} iterations:\n{val_evaluator_res_df}')
-        for k, v in val_evaluator_res.items():
-            self.log(f'val/{k}', v)
+        for k, v in flatten_dict(val_evaluator_res).items():
+            self.log(f'val/{k}', v, add_dataloader_idx=False)
         
         test_evaluator_states = [s['test/evaluator_state'] for s in outputs if 'test/evaluator_state' in s]
         test_evaluator_res = self.test_evaluator.evaluation_end(states=test_evaluator_states)
@@ -2384,8 +2443,8 @@ class PLBase(lightning.LightningModule):
         test_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
         LOGGER.info(f'Test metrics after epoch #{self.current_epoch}, '
                     f'total {self.global_step} iterations:\n{test_evaluator_res_df}')
-        for k, v in test_evaluator_res.items():
-            self.log(f'test/{k}', v)
+        for k, v in flatten_dict(test_evaluator_res).items():
+            self.log(f'test/{k}', v, add_dataloader_idx=False)
     
     def configure_optimizers(self):
         return [
@@ -2401,8 +2460,8 @@ class PLBase(lightning.LightningModule):
         if actual_min < 0 or actual_max > 1:
             warnings.warn(f"""DirectoryVisualizer target image must be in 0..1 range,
                            but it ranges {actual_min}..{actual_max}""")
-        batch = {k: tens.detach().cpu().numpy() for k, tens in batch.items() if k in keys}
-        batch_size = batch['images'].shape[0]
+        batch = {k: tens.detach().cpu().numpy() for k, tens in batch.items() if k in keys or k == 'mask'}
+        batch_size = batch['image'].shape[0]
         items_to_vis = min(batch_size, 10)
         result = []
         for i in range(items_to_vis):
