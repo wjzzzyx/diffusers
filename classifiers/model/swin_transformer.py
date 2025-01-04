@@ -1,9 +1,3 @@
-# Copyright (c) ByteDance, Inc. and its affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
 Mostly copy-paste from Swin-Transformer libarary:
 https://github.com/facebookresearch/dino
@@ -20,8 +14,8 @@ import torch.distributed as dist
 
 from math import sqrt
 from functools import partial
-from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from timm.models.registry import register_model
+from timm.layers import DropPath, to_2tuple, trunc_normal_
+from timm.models import register_model
 
 
 class Mlp(nn.Module):
@@ -100,13 +94,14 @@ class WindowAttention(nn.Module):
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))  # 2*Wh-1 * 2*Ww-1, nH
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
+        )  # 2*Wh-1 * 2*Ww-1, nH
 
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
         coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
-        coords_flatten = torch.flatten(coords, 1)  # 2 Wh*Ww
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
         relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
@@ -120,7 +115,7 @@ class WindowAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        trunc_normal_(self.relative_position_bias_table, std=.02)
+        trunc_normal_(self.relative_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, mask=None, return_attn=False):
@@ -134,7 +129,7 @@ class WindowAttention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
+        attn = q @ k.transpose(-2, -1)
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
@@ -225,7 +220,7 @@ class SwinTransformerBlock(nn.Module):
             attn_drop=attn_drop,
             proj_drop=drop
         )
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer, drop=drop)
 
@@ -498,11 +493,9 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        img_size = (img_size, img_size)
-        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
-        self.img_size = img_size
-        self.patches_resolution = patches_resolution
-        self.num_patches = patches_resolution[0] * patches_resolution[1]
+        self.img_size = (img_size, img_size)
+        self.patches_resolution = [img_size // patch_size, img_size // patch_size]
+        self.num_patches = self.patches_resolution[0] * self.patches_resolution[1]
 
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         if norm_layer is not None:
@@ -518,7 +511,7 @@ class PatchEmbed(nn.Module):
         x = self.proj(x).permute(0, 2, 3, 1)  # B Ph, Pw C
         if self.norm is not None:
             x = self.norm(x)
-        return x
+        return x.permute(0, 3, 1, 2)
 
     def flops(self):
         Ho, Wo = self.patches_resolution
@@ -563,6 +556,7 @@ class SwinTransformer(nn.Module):
                  use_checkpoint=False, fused_window_process=False, **kwargs):
         super().__init__()
 
+        self.patch_size = (patch_size, patch_size)
         self.num_classes = num_classes
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
@@ -766,7 +760,7 @@ class SwinTransformer(nn.Module):
             for k, v in pretrained_dict.items():
                 need_init = (
                         k.split('.')[0] in pretrained_layers
-                        or pretrained_layers[0] is '*'
+                        or pretrained_layers[0] == '*'
                         or 'relative_position_index' not in k
                         or 'attn_mask' not in k
                 )
@@ -825,7 +819,7 @@ class SwinTransformer(nn.Module):
             if (
                     name.split('.')[0] in frozen_layers
                     or '.'.join(name.split('.')[0:2]) in frozen_layers
-                    or (len(frozen_layers) > 0 and frozen_layers[0] is '*')
+                    or (len(frozen_layers) > 0 and frozen_layers[0] == '*')
             ):
                 for _name, param in module.named_parameters():
                     param.requires_grad = False
@@ -836,7 +830,7 @@ class SwinTransformer(nn.Module):
         for name, param in self.named_parameters():
             if (
                     name.split('.')[0] in frozen_layers
-                    or (len(frozen_layers) > 0 and frozen_layers[0] is '*')
+                    or (len(frozen_layers) > 0 and frozen_layers[0] == '*')
                     and param.requires_grad is True
             ):
                 param.requires_grad = False
