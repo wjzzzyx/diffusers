@@ -54,3 +54,30 @@ def sinusoidal_embedding(time: torch.Tensor, dim):
     args = time.unsqueeze(1).float() * freqs.unsqueeze(0)
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     return embedding.to(time.dtype)
+
+
+class SinusoidalEmbedding2D(nn.Module):
+    def __init__(self, dim, T = 10000, normalize = False, scale = 2 * math.pi):
+        super().__init__()
+        self.dim = dim
+        self.T = T
+        self.normalize = normalize
+        self.scale = scale
+    
+    def forward(self, x):
+        height, width = x.size(2), x.size(3)
+        pos_x = torch.arange(width, dtype=torch.float, device=x.device)
+        pos_y = torch.arange(height, dtype=torch.float, device=x.device)
+        if self.normalize:
+            pos_x = pos_x / width * self.scale
+            pos_y = pos_y / height * self.scale
+        emb = torch.exp(- torch.arange(0, self.dim, 2, device=x.device) / self.dim * math.log(self.T))
+        emb_y = pos_y.unsqueeze(-1) * emb.unsqueeze(0)
+        emb_x = pos_x.unsqueeze(-1) * emb.unsqueeze(0)
+        emb_y = torch.cat((torch.sin(emb_y), torch.cos(emb_y)), dim=-1)
+        emb_x = torch.cat((torch.sin(emb_x), torch.cos(emb_x)), dim=-1)
+        emb_y = emb_y.unsqueeze(1).repeat(1, width, 1)
+        emb_x = emb_x.unsqueeze(0).repeat(height, 1, 1)
+        emb = torch.cat((emb_y, emb_x), dim=-1).unsqueeze(0).repeat(x.size(0), 1, 1, 1)
+        emb = emb.permute(0, 3, 1, 2)
+        return emb

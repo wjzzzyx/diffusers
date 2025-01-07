@@ -231,7 +231,14 @@ class DeformableTransformerEncoderLayer(nn.Module):
 
     def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
         # self attention
-        src2 = self.self_attn(self.with_pos_embed(src, pos), reference_points, src, spatial_shapes, level_start_index, padding_mask)
+        src2 = self.self_attn(
+            self.with_pos_embed(src, pos),
+            reference_points,
+            src,
+            spatial_shapes,
+            level_start_index,
+            padding_mask
+        )
         src = src + self.dropout1(src2)
         src = self.norm1(src)
 
@@ -259,7 +266,7 @@ class DeformableTransformerEncoder(nn.Module):
             ref = torch.stack((ref_x, ref_y), -1)    # shape (batch, seq, 2)
             reference_points_list.append(ref)
         reference_points = torch.cat(reference_points_list, 1)
-        reference_points = reference_points[:, :, None] * valid_ratios[:, None]
+        reference_points = reference_points[:, :, None] * valid_ratios[:, None]    # shape (batch, seq, level, 2)
         return reference_points
 
     def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
