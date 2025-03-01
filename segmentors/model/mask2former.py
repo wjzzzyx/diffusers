@@ -445,9 +445,9 @@ class MSDeformAttnTransformerEncoderOnly(nn.Module):
         split_size_or_sections = []
         for i in range(self.num_feature_levels):
             if i < self.num_feature_levels - 1:
-                split_size_or_sections[i] = level_start_index[i + 1] - level_start_index[i]
+                split_size_or_sections.append(level_start_index[i + 1] - level_start_index[i])
             else:
-                split_size_or_sections[i] = memory.shape[1] - level_start_index[i]
+                split_size_or_sections.append(memory.shape[1] - level_start_index[i])
         outs = torch.split(memory, split_size_or_sections, dim=1)
         outs = [out.transpose(1, 2).view(bs, -1, h, w) for out, (h, w) in zip(outs, spatial_shapes)]
 
@@ -585,7 +585,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
             y = self.output_convs[idx](y)
             outs.append(y)
 
-        multi_scale_features = outs[:self.maskformer_num_feature_levels]
+        multi_scale_features = outs[:self.out_ms_feature_levels]
 
         return self.mask_features(outs[-1]), outs[0], multi_scale_features
 
@@ -1236,7 +1236,7 @@ class Trainer():
         }
         group_hypers = {
             "backbone_norm": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optimizer_params.weight_decay_norm},
-            "backbone_embed": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optiizer_params.weight_decay_embed},
+            "backbone_embed": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optimizer_params.weight_decay_embed},
             "backbone_pos": {"lr": base_lr * 0.1, "weight_decay": 0.0},
             "backbone": {"lr": base_lr * 0.1},
             "other_norm": {"weight_decay": optimizer_config.optimizer_params.weight_decay_norm},
@@ -1306,7 +1306,7 @@ class Trainer():
         loss += loss_dict["loss_dice"] * self.loss_config.weight_dice
 
         loss.backward()
-        all_params = itertools.chain(*x["params"] for x in self.optimizer.param_groups)
+        all_params = itertools.chain(x["params"] for x in self.optimizer.param_groups)
         nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
