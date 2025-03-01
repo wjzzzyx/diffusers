@@ -4,6 +4,7 @@ from PIL import Image
 import random
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.v2.functional as TF
 from typing import Union, Sequence
 
 
@@ -12,45 +13,69 @@ class LargeScaleJitter():
     Implementation of large scale jitter from copy_paste
     https://github.com/gaopengcuhk/Pretrained-Pix2Seq/blob/7d908d499212bfabd33aeaa838778a6bfb7b84cc/datasets/transforms.py 
     """
-    def __init__(self, output_size=1024, aug_scale_min=0.1, aug_scale_max=2.0):
-        self.desired_size = torch.tensor(output_size)
+    def __init__(self, output_size: Union[list, int] = 1024, aug_scale_min=0.1, aug_scale_max=2.0):
+        self.target_size = torch.tensor([output_size, output_size]) if isinstance(output_size, int) else torch.tensor(output_size)
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
     
+    def reset(self):
+        self.random_scale = torch.rand(1) * (self.aug_scale_max - self.aug_scale_min) + self.aug_scale_min
+    
     def __call__(self, sample):
-        image, label = sample
-        image_size = torch.tensor(image.shape[-2:])
+        # points: (x, y)
+        # bboxes: (x, y, x, y)
+        image = sample["image"]
+        bboxes = sample["bboxes"] if "bboxes" in sample else None
+        polygons = sample["polygons"] if "polygons" in sample else None
+        mask = sample["mask"] if "mask" in sample else None
 
-        random_scale = torch.rand(1) * (self.aug_scale_max - self.aug_scale_min) + self.aug_scale_min
-        scaled_size = (random_scale * self.desired_size).round()
+        image_size = torch.tensor(image.shape[-2:])
+        scaled_size = (self.target_size * self.random_scale).round()
         # the longer side is scaled to scaled_size
-        scale = torch.minimum(scaled_size / image_size[0], scaled_size / image_size[1])
+        scale = torch.min(scaled_size / image_size)
         scaled_size = (image_size * scale).round().long()
 
+        # resize image and annos
         scaled_image = F.interpolate(image.unsqueeze(0), scaled_size.tolist(), mode='bilinear').squeeze(0)
-        scaled_label = F.interpolate(label.unsqueeze(0), scaled_size.tolist(), mode='nearest').squeeze(0)
+        if bboxes is not None:
+            bboxes *= scale
+        if polygons is not None:
+            for ipoly in range(len(polygons)):
+                polygons[ipoly] *= scale
+        if mask is not None:
+            mask = F.interpolate(mask.unsqueeze(0), scaled_size.tolist(), mode='nearest').squeeze(0)
 
         # random crop
-        crop_size = (min(self.desired_size, scaled_size[0]), min(self.desired_size, scaled_size[1]))
-
-        margin_h = max(scaled_size[0] - crop_size[0], 0).item()
-        margin_w = max(scaled_size[1] - crop_size[1], 0).item()
+        crop_size = torch.minimum(self.target_size, scaled_size)
+        margin_h = (scaled_size[0] - crop_size[0]).item()
+        margin_w = (scaled_size[1] - crop_size[1]).item()
         offset_h = np.random.randint(0, margin_h + 1)
         offset_w = np.random.randint(0, margin_w + 1)
         crop_y1, crop_y2 = offset_h, offset_h + crop_size[0].item()
         crop_x1, crop_x2 = offset_w, offset_w + crop_size[1].item()
 
         scaled_image = scaled_image[:, crop_y1:crop_y2, crop_x1:crop_x2]
-        scaled_label = scaled_label[:, crop_y1:crop_y2, crop_x1:crop_x2]
+        if bboxes is not None:
+            bboxes[:, 0] = (bboxes[:, 0] - crop_x1).clamp(min=0, max=self.target_size[1])
+            bboxes[:, 1] = (bboxes[:, 1] - crop_y1).clamp(min=0, max=self.target_size[0])
+            bboxes[:, 2] = (bboxes[:, 2] - crop_x1).clamp(min=0, max=self.target_size[1])
+            bboxes[:, 3] = (bboxes[:, 3] - crop_y1).clamp(min=0, max=self.target_size[0])
+        if polygons is not None:
+            for poly in polygons:
+                poly[:, 0] = (poly[:, 0] - crop_x1).clamp(min=0, max=self.target_size[1])
+                poly[:, 1] = (poly[:, 1] - crop_y1).clamp(min=0, max=self.target_size[0])
+        if mask is not None:
+            mask = mask[:, crop_y1:crop_y2, crop_x1:crop_x2]
 
         # pad
-        padding_h = max(self.desired_size - scaled_image.size(1), 0).item()
-        padding_w = max(self.desired_size - scaled_image.size(2), 0).item()
+        padding_h = max(self.target_size[0] - scaled_image.size(1), 0).item()
+        padding_w = max(self.target_size[1] - scaled_image.size(2), 0).item()
         image = F.pad(scaled_image, [0, padding_w, 0, padding_h], value=128)
-        label = F.pad(scaled_label, [0, padding_w, 0, padding_h], value=0)
+        if mask is not None:
+            # TODO mask padding value?
+            mask = F.pad(mask, [0, padding_w, 0, padding_h], value=0)
 
-        return image, label
-
+        return {"image": image, "bboxes": bboxes, "polygons": polygons, "mask": mask}
 
 
 class RandomCrop_FGAware():
@@ -183,3 +208,35 @@ class RandomResizedCrop_FGAware():
         mask = mask.resize(self.size, resample=Image.NEAREST)
 
         return image, mask
+
+
+class RandomHorizontalFlip():
+    def __init__(self, p: float = 0.5):
+        self.p = p
+    
+    def reset(self):
+        self.do_flip = random.random() < self.p
+    
+    def __call__(self, sample):
+        if self.do_flip:
+            image = sample["image"]
+            bboxes = sample["bboxes"] if "bboxes" in sample else None
+            polygons = sample["polygons"] if "polygons" in sample else None
+            mask = sample["mask"] if "mask" in sample else None
+
+            image = TF.horizontal_flip(image)
+            height, width = image.shape[-2:]
+            if bboxes is not None:
+                bboxes[:, 0] = width - bboxes[:, 2]
+                bboxes[:, 2] = width - bboxes[:, 0]
+            if polygons is not None:
+                for poly in polygons:
+                    poly[:, 0] = width - poly[:, 0]
+            if mask is not None:
+                mask = TF.horizontal_flip(mask)
+            
+            return {"image": image, "bboxes": bboxes, "polygons": polygons, "mask": mask}
+        
+        else:
+            return sample
+        

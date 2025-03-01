@@ -1,3 +1,14 @@
+from PIL import Image
+
+import torch
+from torch.utils.data import Dataset
+import torchvision.transforms.v2 as T
+import torchvision.transforms.v2.functional as TF
+import pycocotools
+
+from segmentors.transform import RandomHorizontalFlip, LargeScaleJitter
+
+
 # All coco categories, together with their nice-looking visualization colors
 # It's from https://github.com/cocodataset/panopticapi/blob/master/panoptic_coco_categories.json
 COCO_CATEGORIES = [
@@ -135,3 +146,248 @@ COCO_CATEGORIES = [
     {"color": [102, 102, 156], "isthing": 0, "id": 199, "name": "wall-other-merged"},
     {"color": [250, 141, 255], "isthing": 0, "id": 200, "name": "rug-merged"},
 ]
+
+
+def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
+    """
+    Load a json file with COCO's instances annotation format.
+    Currently supports instance detection, instance segmentation,
+    and person keypoints annotations.
+
+    Args:
+        json_file (str): full path to the json file in COCO instances annotation format.
+        image_root (str or path-like): the directory where the images in this json file exists.
+        dataset_name (str or None): the name of the dataset (e.g., coco_2017_train).
+            When provided, this function will also do the following:
+
+            * Put "thing_classes" into the metadata associated with this dataset.
+            * Map the category ids into a contiguous range (needed by standard dataset format),
+              and add "thing_dataset_id_to_contiguous_id" to the metadata associated
+              with this dataset.
+
+            This option should usually be provided, unless users need to load
+            the original json content and apply more processing manually.
+        extra_annotation_keys (list[str]): list of per-annotation keys that should also be
+            loaded into the dataset dict (besides "iscrowd", "bbox", "keypoints",
+            "category_id", "segmentation"). The values for these keys will be returned as-is.
+            For example, the densepose annotations are loaded in this way.
+
+    Returns:
+        list[dict]: a list of dicts in Detectron2 standard dataset dicts format (See
+        `Using Custom Datasets </tutorials/datasets.html>`_ ) when `dataset_name` is not None.
+        If `dataset_name` is None, the returned `category_ids` may be
+        incontiguous and may not conform to the Detectron2 standard format.
+
+    Notes:
+        1. This function does not read the image files.
+           The results do not have the "image" field.
+    """
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        coco_api = pycocotools.coco.COCO(json_file)
+    
+    id_map = None
+    if dataset_name is not None:
+        cat_ids = sorted(coco_api.getCatIds())
+        cats = coco_api.loadCats(cat_ids)
+        # The categories in a custom json file may not be sorted.
+        thing_classes = [c["name"] for c in sorted(cats, key=lambda x: x["id"])]
+
+    # sort indices for reproducible results
+    img_ids = sorted(coco_api.imgs.keys())
+    # imgs is a list of dicts, each looks something like:
+    # {'license': 4,
+    #  'url': 'http://farm6.staticflickr.com/5454/9413846304_881d5e5c3b_z.jpg',
+    #  'file_name': 'COCO_val2014_000000001268.jpg',
+    #  'height': 427,
+    #  'width': 640,
+    #  'date_captured': '2013-11-17 05:57:24',
+    #  'id': 1268}
+    imgs = coco_api.loadImgs(img_ids)
+    # anns is a list[list[dict]], where each dict is an annotation
+    # record for an object. The inner list enumerates the objects in an image
+    # and the outer list enumerates over images. Example of anns[0]:
+    # [
+    #   {
+    #     'segmentation': [[192.81, 247.09, ... 219.03, 249.06]],
+    #     'area': 1035.749,
+    #     'iscrowd': 0,
+    #     'image_id': 1268,
+    #     'bbox': [192.81, 224.8, 74.73, 33.43],
+    #     'category_id': 16,
+    #     'id': 42986
+    #   },
+    #  ...
+    # ]
+    anns = [coco_api.imgToAnns[img_id] for img_id in img_ids]
+    total_num_valid_anns = sum([len(x) for x in anns])
+    total_num_anns = len(coco_api.anns)
+    if total_num_valid_anns < total_num_anns:
+        logger.warning(
+            f"{json_file} contains {total_num_anns} annotations, but only "
+            f"{total_num_valid_anns} of them match to images in the file."
+        )
+
+    # if "minival" not in json_file:
+    #     # The popular valminusminival & minival annotations for COCO2014 contain this bug.
+    #     # However the ratio of buggy annotations there is tiny and does not affect accuracy.
+    #     # Therefore we explicitly white-list them.
+    #     ann_ids = [ann["id"] for anns_per_image in anns for ann in anns_per_image]
+    #     assert len(set(ann_ids)) == len(ann_ids), "Annotation ids in '{}' are not unique!".format(
+    #         json_file
+    #     )
+
+    imgs_anns = list(zip(imgs, anns))
+    logger.info("Loaded {} images in COCO format from {}".format(len(imgs_anns), json_file))
+
+    dataset_dicts = []
+
+    ann_keys = ["iscrowd", "bbox", "keypoints", "category_id"] + (extra_annotation_keys or [])
+
+    num_instances_without_valid_segmentation = 0
+
+    for img_dict, anno_dict_list in imgs_anns:
+        record = {}
+        record["file_name"] = os.path.join(image_root, img_dict["file_name"])
+        record["height"] = img_dict["height"]
+        record["width"] = img_dict["width"]
+        image_id = record["image_id"] = img_dict["id"]
+
+        objs = []
+        for anno in anno_dict_list:
+            # Check that the image_id in this annotation is the same as
+            # the image_id we're looking at.
+            # This fails only when the data parsing logic or the annotation file is buggy.
+
+            # The original COCO valminusminival2014 & minival2014 annotation files
+            # actually contains bugs that, together with certain ways of using COCO API,
+            # can trigger this assertion.
+            assert anno["image_id"] == image_id
+
+            assert anno.get("ignore", 0) == 0, '"ignore" in COCO json file is not supported.'
+
+            obj = {key: anno[key] for key in ann_keys if key in anno}
+            if "bbox" in obj and len(obj["bbox"]) == 0:
+                raise ValueError(
+                    f"One annotation of image {image_id} contains empty 'bbox' value! "
+                    "This json does not have valid COCO format."
+                )
+
+            segm = anno.get("segmentation", None)
+            if segm:  # either list[list[float]] or dict(RLE)
+                if isinstance(segm, dict):
+                    if isinstance(segm["counts"], list):
+                        # convert to compressed RLE
+                        segm = mask_util.frPyObjects(segm, *segm["size"])
+                else:
+                    # filter out invalid polygons (< 3 points)
+                    segm = [poly for poly in segm if len(poly) % 2 == 0 and len(poly) >= 6]
+                    if len(segm) == 0:
+                        num_instances_without_valid_segmentation += 1
+                        continue  # ignore this instance
+                obj["segmentation"] = segm
+
+            keypts = anno.get("keypoints", None)
+            if keypts:  # list[int]
+                for idx, v in enumerate(keypts):
+                    if idx % 3 != 2:
+                        # COCO's segmentation coordinates are floating points in [0, H or W],
+                        # but keypoint coordinates are integers in [0, H-1 or W-1]
+                        # Therefore we assume the coordinates are "pixel indices" and
+                        # add 0.5 to convert to floating point coordinates.
+                        keypts[idx] = v + 0.5
+                obj["keypoints"] = keypts
+
+            obj["bbox_mode"] = BoxMode.XYWH_ABS
+            objs.append(obj)
+        record["annotations"] = objs
+        dataset_dicts.append(record)
+
+    if num_instances_without_valid_segmentation > 0:
+        logger.warning(
+            "Filtered out {} instances without valid segmentation. ".format(
+                num_instances_without_valid_segmentation
+            )
+            + "There might be issues in your dataset generation process.  Please "
+            "check https://detectron2.readthedocs.io/en/latest/tutorials/datasets.html carefully"
+        )
+    return dataset_dicts
+
+
+def convert_polygons_to_mask(polygons: list[torch.Tensor], height, width):
+    polygons = [p.view(-1).numpy() for p in polygons]
+    rles = pycocotools.mask.frPyObjects(polygons, height, width)
+    mask = pycocotools.mask.decode(rles)
+    if len(mask.shape) < 3:    # ?
+        mask = mask[..., None]
+    mask = torch.as_tensor(mask, dtype=torch.uint8)
+    mask = mask.any(dim=2)
+    return mask
+
+
+def get_bbox_from_mask(mask: torch.Tensor):
+    ys, xs = torch.nonzero(mask, as_tuple=True)
+    return torch.tensor([xs.min(), ys.min(), xs.max(), ys.max()])
+
+
+def filter_empty_instances(classes: torch.Tensor, bboxes: torch.Tensor, masks: torch.Tensor):
+    keep = ((bboxes[:, 2] - bboxes[:, 0]) > 1e-5) & ((bboxes[:, 3] - bboxes[:, 1]) > 1e-5)
+    keep &= masks.any(dim=(1, 2))
+    return classes[keep], bboxes[keep], masks[keep]
+
+
+class COCOInstanceDataset(Dataset):
+    def __init__(self, data_dir, json_file):
+        self.data = load_coco_json(json_file, data_dir, )
+        self.transform = T.Compose([
+            RandomHorizontalFlip(),
+            LargeScaleJitter(),
+        ])
+    
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        info = self.data[index]
+        image = Image.open(info["file_name"]).convert("RGB")
+        if image.width != info["width"] or image.height != info["height"]:
+            raise ValueError("Image size mismatch with info.")
+        image = TF.pil_to_tensor(image)
+        annos = info["annotations"]
+        annos = [obj for obj in annos if obj.get("iscrowd", 0) == 0]    # how many bboxes and polygons if iscrowd?
+        self.transform.reset()
+        image = self.transform(image=image)
+        padding_mask = torch.ones(image.shape[-2:])
+        padding_mask = self.transform(mask=padding_mask)["mask"]
+        padding_mask = ~padding_mask.bool()
+        augs = list()
+        for obj in annos:
+            raw_mask = obj["segmentation"]
+            if isinstance(raw_mask, list):    # a list of polygons
+                polygons = [torch.as_tensor(p).view(-1, 2) for p in raw_mask]
+                augs.append(self.transform(bboxes=bboxes, polygons=polygons))
+                augs[-1]["mask"] = convert_polygons_to_mask(
+                    augs[-1].pop("polygons"), image.height, image.width
+                )
+            elif isinstance(raw_mask, dict):    # rle
+                mask = pycocotools.mask.decode(raw_mask)
+                augs.append(self.transform(bboxes=bboxes, mask=mask))
+        
+        classes = torch.tensor([obj["category_id"] for obj in annos])
+        # bboxes = torch.stack([obj["bbox"] for obj in augs])
+        # transform may cause the bbox to be loose
+        bboxes = torch.stack([get_bbox_from_mask(obj["mask"]) for obj in augs])
+        masks = torch.stack([obj["mask"] for obj in augs])
+        classes, bboxes, masks = filter_empty_instances(classes, bboxes, masks)
+        
+        return {
+            "image_id": info["image_id"],
+            "image_fname": info["file_name"],
+            "height": info["height"],
+            "width": info["width"],
+            "image": image,
+            "classes": classes,
+            "bboxes": bboxes,
+            "masks": masks,
+            "padding_mask": padding_mask
+        }

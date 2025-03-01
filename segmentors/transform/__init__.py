@@ -1,2 +1,2 @@
 from .sam_resize import ResizeLongestSide
-from .large_scale_jitter import LargeScaleJitter
+from .transforms import *
