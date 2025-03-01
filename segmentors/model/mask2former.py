@@ -1,15 +1,21 @@
+import itertools
+import logging
 from typing import List, Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
+import torchmetrics
 from timm.layers import DropPath, to_2tuple, trunc_normal_
 
 from modules.multiscale_deform_attn import MSDeformAttn
 from modules.position_embedding import SinusoidalEmbedding2D
 from classifiers.model.swin_transformer import PatchEmbed, PatchMerging, SwinTransformerBlock
 from detectors.model.deformable_detr import DeformableTransformerEncoderLayer, DeformableTransformerEncoder
+from segmentors.loss.matching_based import SetClassSegmentLoss
+import torch_utils
 import utils
 
 
@@ -1009,10 +1015,13 @@ class MaskFormer(nn.Module):
         self.overlap_threshold = config.model.mask_former.test.overlap_threshold
         self.object_mask_threshold = config.model.mask_former.test.object_mask_threshold
         
-        self.dataset_thing_id_to_contiguous_id = dict()
+        self.dataset_id_to_contiguous_id = dict()
+        self.dataset_thing_ids = set()
         for i, cat in enumerate(utils.get_obj_from_str(config.dataset_categories)):
+            self.dataset_id_to_contiguous_id[cat["id"]] = i
             if cat["isthing"]:
-                self.dataset_thing_id_to_contiguous_id[cat["id"]] = i
+                self.dataset_thing_ids.add(cat["id"])
+        self.contiguous_id_to_dataset_id = {v: k for k, v in self.dataset_id_to_contiguous_id.items()}
 
         if config.model.mask_former.size_divisibility < 0:
             self.size_divisibility = self.backbone.size_divisibility
@@ -1085,8 +1094,8 @@ class MaskFormer(nn.Module):
         for mask_cls_result, mask_pred_result, height, width, image_size in zip(
             mask_cls_results, mask_pred_results, batch["height"], batch["width"], image_sizes
         ):
-            # height = input_per_image.get("height", image_size[0])
-            # width = input_per_image.get("width", image_size[1])
+            # mask_cls_result: shape (query, class)
+            # mask_pred_result: shape (query, h, w)
             processed_results.append({})
 
             if self.sem_seg_postprocess_before_inference:
@@ -1097,7 +1106,7 @@ class MaskFormer(nn.Module):
                 r = self.semantic_inference(mask_cls_result, mask_pred_result)
                 if not self.sem_seg_postprocess_before_inference:
                     r = sem_seg_postprocess(r, image_size, height, width)
-                processed_results[-1]["sem_seg"] = r
+                processed_results[-1]["sem_seg"] = r    # shape (class, h, w)
             
             if self.panoptic_on:
                 panoptic_r = self.panoptic_inference(mask_cls_result, mask_pred_result)
@@ -1126,7 +1135,7 @@ class MaskFormer(nn.Module):
         cur_mask_cls = mask_cls[keep]
         cur_mask_cls = cur_mask_cls[:, :-1]
 
-        cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks
+        cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks    # shape (query, h, w)
 
         h, w = cur_masks.shape[-2:]
         panoptic_seg = torch.zeros((h, w), dtype=torch.int32, device=cur_masks.device)
@@ -1140,9 +1149,10 @@ class MaskFormer(nn.Module):
         else:
             cur_mask_ids = cur_prob_masks.argmax(0)
             stuff_memory_list = {}
-            for k in range(cur_classes.shape[0]):
+            for k in range(cur_classes.shape[0]):    # for each query
                 pred_class = cur_classes[k].item()
-                isthing = pred_class in self.dataset_thing_id_to_contiguous_id.values()
+                pred_dataset_class = self.contiguous_id_to_dataset_id[int(pred_class)]
+                isthing = pred_dataset_class in self.dataset_thing_ids
                 mask_area = (cur_mask_ids == k).sum().item()
                 original_area = (cur_masks[k] >= 0.5).sum().item()
                 mask = (cur_mask_ids == k) & (cur_masks[k] >= 0.5)
@@ -1164,7 +1174,7 @@ class MaskFormer(nn.Module):
                     segments_info.append({
                         "id": current_segment_id,
                         "isthing": bool(isthing),
-                        "category_id": int(pred_class)
+                        "category_id": pred_dataset_class
                     })
             
             return panoptic_seg, segments_info
@@ -1185,7 +1195,7 @@ class MaskFormer(nn.Module):
         if self.panoptic_on:
             keep = torch.zeros_like(scores_per_image).bool()
             for i, lab in enumerate(labels_per_image):
-                keep[i] = lab in self.dataset_thing_id_to_contiguous_id.values()
+                keep[i] = lab in self.dataset_thing_ids
             scores_per_image = scores_per_image[keep]
             labels_per_image = labels_per_image[keep]
             mask_pred = mask_pred[keep]
@@ -1198,3 +1208,135 @@ class MaskFormer(nn.Module):
         result['scores'] = scores_per_image * mask_scores_per_image
         result['pred_classes'] = labels_per_image
         return result
+
+
+class Trainer():
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        _model = MaskFormer(model_config)
+        _model.cuda()
+        self.model = DistributedDataParallel(_model, device_ids=[device])
+
+        self.loss_fn = SetClassSegmentLoss(
+            loss_config.num_classes, loss_config.empty_class_weight,
+            loss_config.cost_class, loss_config.cost_bce, loss_config.cost_dice,
+            loss_config.num_points, loss_config.oversample_ratio, loss_config.importance_sample_ratio
+        )
+
+        # prepare optimizers
+        base_lr = optimizer_config.optimizer_params.lr
+        group_params = {
+            "backbone_norm": [],
+            "backbone_embed": [],
+            "backbone_pos": [],
+            "backbone": [],
+            "other_norm": [],
+            "other_embed": [],
+            "other_pos": [],
+            "other": []
+        }
+        group_hypers = {
+            "backbone_norm": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optimizer_params.weight_decay_norm},
+            "backbone_embed": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optiizer_params.weight_decay_embed},
+            "backbone_pos": {"lr": base_lr * 0.1, "weight_decay": 0.0},
+            "backbone": {"lr": base_lr * 0.1},
+            "other_norm": {"weight_decay": optimizer_config.optimizer_params.weight_decay_norm},
+            "other_embed": {"weight_decay": optimizer_config.optimizer_params.weight_decay_embed},
+            "other_pos": {"weight_decay": 0.0},
+            "other": {}
+        }
+        for module_name, module in self.model.named_modules():
+            for module_param_name, param in module.named_parameters(recurse=False):
+                if not param.requires_grad:
+                    continue
+                if "backbone" in module_name:
+                    if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
+                        group_params["backbone_embed"].append(param)
+                    elif isinstance(module, [nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d]):
+                        group_params["backbone_norm"].append(param)
+                    else:
+                        group_params["backbone"].append(param)
+                else:
+                    if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
+                        group_params["other_embed"].append(param)
+                    elif isinstance(module, [nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d]):
+                        group_params["other_norm"].append(param)
+                    else:
+                        group_params["other"].append(param)
+        groups = [{"params": group_params[key], **group_hypers[key]} for key in group_params]
+
+        self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
+            groups, **optimizer_config.optimizer_params
+        )
+        self.lr_scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
+            self.optimizer, **optimizer_config.lr_scheduler_params
+        )
+        if optimizer_config.warmup:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=0.1, total_iters=self.optimizer_config.warmup
+            )
+            lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
+                self.optimizer, [warmup_scheduler, lr_scheduler], milestones=[optimizer_config.warmup]
+            )
+        
+        # prepare metrics
+        self.loss_meters = {
+            "loss_class": torch_utils.RunningStatistic(),
+            "loss_bce": torch_utils.RunningStatistic(),
+            "loss_dice": torch_utils.RunningStatistic()
+        }
+        self.metric_pq = torchmetrics.detection.PanopticQuality()
+    
+    def on_train_epoch_start(self):
+        self.model.train()
+        for key in self.loss_meters:
+            self.loss_meters[key].reset()
+    
+    def train_step(self, batch, batch_idx, global_step):
+        batch_size = batch['image'].size(0)
+        outputs = self.model(batch)
+        if "instance" in batch:
+            gt_instances = batch["instances"]
+            targets = prepare_targets(gt_instances, images)
+        else:
+            targets = None
+        
+        loss_dict = self.loss_fn(outputs, targets)
+        loss = loss_dict["loss_class"] * self.loss_config.weight_class
+        loss += loss_dict["loss_bce"] * self.loss_config.weight_bce
+        loss += loss_dict["loss_dice"] * self.loss_config.weight_dice
+
+        loss.backward()
+        all_params = itertools.chain(*x["params"] for x in self.optimizer.param_groups)
+        nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.lr_scheduler.step()
+
+        for key, value in loss_dict.items():
+            self.loss_meters[key].update(value.item(), batch_size)
+        
+    def on_train_epoch_end(self, epoch):
+        logdict = dict()
+        for key in self.loss_meters:
+            val = self.loss_meters[key].compute()
+            logdict[f"train/{key}"] = val
+        return logdict
+    
+    def on_val_epoch_start(self):
+        self.model.eval()
+        self.metric_pq.reset()
+    
+    def val_step(self, batch, batch_idx):
+        processed_results = self.model.inference(batch)
+        for res in processed_results:
+            panoptic_id_mask, panoptic_sem_mask, segments_info = res["panoptic_seg"]
+            panoptic_mask = torch.stack((panoptic_sem_mask, panoptic_id_mask), dim=-1)
+            self.metric_pq.update(panoptic_mask.unsqueeze(0), batch["panoptic_mask"])
+    
+    def on_val_epoch_end(self):
+        logdict = dict()
+        quality = self.metric_pq.compute()
+        logdict[f"val/pq"] = quality[0].item()
+        logdict[f"val/sq"] = quality[1].item()
+        logdict[f"val/rq"] = quality[2].item()
+        return logdict
