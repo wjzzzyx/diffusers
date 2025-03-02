@@ -1,4 +1,4 @@
-syncnorm?
+# syncnorm?
 
 import argparse, datetime, os
 import logging
@@ -42,7 +42,6 @@ def main(args):
     local_rank = int(os.environ.get("LOCAL_RANK", "0")) or rank % local_world_size
     os.environ["WORLD_SIZE"] = os.environ.get("WORLD_SIZE", str(world_size))
     torch.cuda.set_device(local_rank)
-    train_device = torch.device(f"cuda:{local_rank}")
 
     config = OmegaConf.load(args.config)
     
@@ -67,7 +66,7 @@ def main(args):
     
     logging.info(f"Using distributed training with {world_size} GPU(s).")
 
-    seed_all(config.model.seed)
+    seed_all(config.trainer.seed)
 
     train_dataset = utils.instantiate_from_config(config.data.train)
     train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
@@ -80,65 +79,97 @@ def main(args):
         drop_last=True,
         num_workers=0
     )
-    val_datasets = [utils.instantiate_from_config(cfg) for cfg in config.data.val]
-    val_dataloaders = [
-        torch.utils.data.DataLoader(
+    val_datasets = {cfg.name: utils.instantiate_from_config(cfg) for cfg in config.data.val}
+    val_dataloaders = {
+        name: torch.utils.data.DataLoader(
             val_dataset,
             batch_size=config.data.val_batch_size,
             shuffle=False,
             num_workers=config.data.num_workers,
-        ) for val_dataset in val_datasets
-    ]
+        ) for name, val_dataset in val_datasets.items()
+    }
 
     # prepare model
-    _model = utils.instantiate_from_config(config.model_config)
-    _model.cuda()
-    model = DistributedDataParallel(_model, device_ids=[local_rank])
-
-    # prepare optimizer
-    optimizer_config = config.pop("optimizer_config")
-    optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
-        model.trainable_params(), **optimizer_config.optimizer_params
+    trainer = utils.get_obj_from_str(config.trainer.target)(
+        config.trainer.model_config,
+        config.trainer.loss_config,
+        config.trainer.optimizer_config,
+        device=local_rank
     )
-    scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
-        optimizer, **optimizer_config.lr_scheduler_params
-    )
+    
+    train_config = config.pop("train_config")
+    train(args, train_config, trainer, train_dataloader, val_dataloaders)
 
-    train(args, model, train_dataloader, val_dataloaders, optimizer, scheduler)
+    dist.destroy_process_group()
 
 
 def train(
     args,
     train_config,
-    model_file,
-    model,
+    trainer,
     train_dataloader,
     val_dataloaders,
-    optimizer,
-    lr_scheduler
 ):
     global_step = 0
     start_epoch = 1
     for epoch in range(start_epoch, train_config.num_epochs + 1):
-        model.train()
         train_dataloader.sampler.set_epoch(epoch)
+        trainer.on_train_epoch_start()
         for batch_idx, batch in enumerate(train_dataloader):
-            model_file.train_step(model, batch, optimizer, lr_scheduler)
+            trainer.train_step(batch, batch_idx, global_step)
             global_step += 1
+        logdict = trainer.on_train_epoch_end(epoch)
+        if dist.get_rank() == 0:
+            logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
         
         if epoch % train_config.eval_interval == 0:
-            model.eval()
-            eval()
+            datasets_results = eval(trainer, val_dataloaders)
+            if dist.get_rank() == 0:
+                msg = f"Rank {dist.get_rank()}: Epoch {epoch}, validation metrics \n"
+                for key, res in datasets_results.items():
+                    msg += f"Dataset {key}: {res}\n"
+                logging.info(msg)
         
         if epoch % train_config.ckpt_interval == 0 and dist.get_rank() == 0:
             checkpoint = {
                 "epoch": epoch,
                 "global_step": global_step,
-                "model": model.module.state_dict()
+                "model": trainer.get_model_state_dict()
             }
             if train_config.save_optimizer_states:
-                checkpoint["optimizer"] = optimizer.state_dict()
-                checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
+                checkpoint["optimizer"] = trainer.get_optimizer_state_dict()
+                checkpoint["lr_scheduler"] = trainer.get_lr_scheduler_state_dict()
             torch.save(checkpoint, os.path.join(args.ckptdir, f"epoch{epoch}_step{global_step}.ckpt"))
         
         dist.barrier()
+
+
+def eval(trainer, val_dataloaders):
+    datasets_results = dict()
+    for name, dataloader in val_dataloaders.items():
+        trainer.on_val_epoch_start()
+        for batch_idx, batch in enumerate(dataloader):
+            trainer.val_step(batch, batch_idx)
+        epoch_metric_dict = trainer.on_val_epoch_end()
+        datasets_results[name] = epoch_metric_dict
+    return datasets_results
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True, metavar='config.yaml', help='Path to experiment config.')
+    parser.add_argument('--resume', type=str, const=True, nargs='?', help='Resume from logdir.')
+    parser.add_argument('--logdir', type=str, default='logs', help='Directory for logs, checkpoints, samples, etc.')
+    args, unknown = parser.parse_known_args()
+
+    """
+    As opposed to the case of rigid launch, distributed training now:
+    (*: elastic launch only; **: Slurm srun only)
+        *1. handles failures by restarting all the workers 
+        *2.1 assigns RANK and WORLD_SIZE automatically
+        **2.2 sets MASTER_ADDR & MASTER_PORT manually beforehand via environment variables
+        *3. allows for number of nodes change
+        4. uses TCP initialization by default
+    **5. supports multi-node training
+    """
+    main(args)
