@@ -1,3 +1,4 @@
+import copy
 import itertools
 import logging
 from typing import List, Dict, Optional
@@ -1209,62 +1210,43 @@ class Trainer():
         self.model = DistributedDataParallel(_model, device_ids=[device])
 
         self.loss_fn = SetClassSegmentLoss(
-            loss_config.num_classes, loss_config.empty_class_weight,
-            loss_config.cost_class, loss_config.cost_bce, loss_config.cost_dice,
+            loss_config.num_classes, loss_config.weight_empty_class,
+            loss_config.weight_class, loss_config.weight_bce, loss_config.weight_dice,
             loss_config.num_points, loss_config.oversample_ratio, loss_config.importance_sample_ratio
         )
 
         # prepare optimizers
-        base_lr = optimizer_config.optimizer_params.lr
-        group_params = {
-            "backbone_norm": [],
-            "backbone_embed": [],
-            "backbone_pos": [],
-            "backbone": [],
-            "other_norm": [],
-            "other_embed": [],
-            "other_pos": [],
-            "other": []
-        }
-        group_hypers = {
-            "backbone_norm": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optimizer_params.weight_decay_norm},
-            "backbone_embed": {"lr": base_lr * 0.1, "weight_decay": optimizer_config.optimizer_params.weight_decay_embed},
-            "backbone_pos": {"lr": base_lr * 0.1, "weight_decay": 0.0},
-            "backbone": {"lr": base_lr * 0.1},
-            "other_norm": {"weight_decay": optimizer_config.optimizer_params.weight_decay_norm},
-            "other_embed": {"weight_decay": optimizer_config.optimizer_params.weight_decay_embed},
-            "other_pos": {"weight_decay": 0.0},
-            "other": {}
-        }
+        defaults = {"lr": optimizer_config.base_lr, "weight_decay": optimizer_config.weight_decay}
+        groups = list()
+        memo = set()
         for module_name, module in self.model.named_modules():
             for module_param_name, param in module.named_parameters(recurse=False):
                 if not param.requires_grad:
                     continue
+                if param in memo:
+                    raise ValueError("duplicate parameters")
+                memo.add(param)
+
+                hyperparams = copy.copy(defaults)
                 if "backbone" in module_name:
-                    if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
-                        group_params["backbone_embed"].append(param)
-                    elif isinstance(module, [nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d]):
-                        group_params["backbone_norm"].append(param)
-                    else:
-                        group_params["backbone"].append(param)
-                else:
-                    if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
-                        group_params["other_embed"].append(param)
-                    elif isinstance(module, [nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d]):
-                        group_params["other_norm"].append(param)
-                    else:
-                        group_params["other"].append(param)
-        groups = [{"params": group_params[key], **group_hypers[key]} for key in group_params]
+                    hyperparams["lr"] = hyperparams["lr"] * optimizer_config.backbone_multiplier
+                if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
+                    hyperparams["weight_decay"] = 0.0
+                if isinstance(module, [nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d]):
+                    hyperparams["weight_decay"] = optimizer_config.weight_decay_norm
+                if isinstance(module, nn.Embedding):
+                    hyperparams["weight_decay"] = optimizer_config.weight_decay_embed
+                groups.append({"params": [param], **hyperparams})
 
         self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
-            groups, **optimizer_config.optimizer_params
+            groups, optimizer_config.base_lr
         )
         self.lr_scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
             self.optimizer, **optimizer_config.lr_scheduler_params
         )
         if optimizer_config.warmup:
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-                self.optimizer, start_factor=0.1, total_iters=self.optimizer_config.warmup
+                self.optimizer, start_factor=0.1, total_iters=optimizer_config.warmup
             )
             lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
                 self.optimizer, [warmup_scheduler, lr_scheduler], milestones=[optimizer_config.warmup]
