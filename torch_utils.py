@@ -79,3 +79,30 @@ class CheckpointFunction(torch.autograd.Function):
 def count_params(model):
     total_params = sum(p.numel() for p in model.parameters())
     return total_params
+
+
+class RunningStatistic():
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.sum = 0
+        self.count = 0
+        self.val = 0
+    
+    def update(self, val, n):
+        # val is the mean over n counts
+        self.count += n
+        self.sum += val * n
+        self.val = val
+    
+    def compute(self):
+        if dist.is_available() and dist.is_initialized():
+            sum_t = torch.tensor(self.sum)
+            count_t = torch.tensor(self.count)
+            dist.reduce(sum_t, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(count_t, dst=0, op=dist.ReduceOp.SUM)
+            mean = sum_t.item() / count_t.item()
+        else:
+            mean = self.sum / self.count
+        return mean
