@@ -1,0 +1,62 @@
+exp_name: debug
+
+trainer:
+  seed: 42
+  target: segmentors.model.mask2former.Trainer
+  model_config:
+    weights:
+    pixel_mean: [123.675, 116.280, 103.530]
+    pixel_std: [58.395, 57.120, 57.375]
+    sem_seg_head:
+      in_features: ["res2", "res3", "res4", "res5"]
+      ignore_value: 255
+      num_classes: 80
+      convs_dim: 256
+      mask_dim: 256
+      deformable_transformer_encoder_in_features: ["res3", "res4", "res5"]
+      transformer_enc_layers: 6
+    mask_former:
+      transformer_in_feature: multi_scale_pixel_decoder
+      deep_supervision: True
+      hidden_dim: 256
+      nheads: 8
+      dim_feedforward: 2048
+      dec_layers: 10
+  loss_config:
+    weight_empty_class: 0.1
+    weight_class: 2.0
+    weight_bce: 5.0
+    weight_dice: 5.0
+    num_points: 12544
+    oversample_ratio: 3.0
+    importance_sample_ratio: 0.75
+  optimizer_config:
+    optimizer: torch.optim.AdamW
+    base_lr: 0.0001
+    weight_decay: 0.05
+    weight_decay_norm: 
+    weight_decay_embed: 
+    lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+    warmup: 10
+
+data:
+  batch_size: 16
+  val_batch_size: 8
+  num_workers: 0
+  train:
+    target: segmentors.data.coco.COCOInstanceDataset
+    params:
+      data_dir:
+      json_file:
+  val:
+    - name: 
+      target: segmentors.data.coco.COCOInstanceDataset
+      params:
+        data_dir:
+        json_file:
+
+train_config:
+  num_epochs: 100
+  eval_interval: 1
+  ckpt_interval: 1
+  save_optimizer_states: True
