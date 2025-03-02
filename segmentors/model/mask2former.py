@@ -473,15 +473,15 @@ class MSDeformAttnPixelDecoder(nn.Module):
             norm (str or callable): normalization for all conv layers
         """
         super().__init__()
-        conv_dim = config.model.sem_seg_head.convs_dim
-        mask_dim = config.model.sem_seg_head.mask_dim
-        norm = config.model.sem_seg_head.norm
-        transformer_dropout = config.model.mask_former.dropout
-        transformer_nheads = config.model.mask_former.nheads
+        conv_dim = config.sem_seg_head.convs_dim
+        mask_dim = config.sem_seg_head.mask_dim
+        norm = config.sem_seg_head.norm
+        transformer_dropout = config.mask_former.dropout
+        transformer_nheads = config.mask_former.nheads
         transformer_dim_feedforward = 1024    # use 1024 for deformable transformer encoder
-        transformer_enc_layers = config.model.sem_seg_head.transformer_enc_layers
-        self.transformer_in_features = config.model.sem_seg_head.deformable_transformer_encoder_in_features
-        common_stride = config.model.sem_seg_head.common_stride
+        transformer_enc_layers = config.sem_seg_head.transformer_enc_layers
+        self.transformer_in_features = config.sem_seg_head.deformable_transformer_encoder_in_features
+        common_stride = config.sem_seg_head.common_stride
         self.out_ms_feature_levels = 3  # always use 3 scales
 
         # this is the input shape of pixel decoder
@@ -749,27 +749,27 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         super().__init__()
         assert mask_classification, "Only support mask classification model"
         self.mask_classification = mask_classification
-        hidden_dim = config.model.mask_former.hidden_dim
+        hidden_dim = config.mask_former.hidden_dim
 
         # positional encoding
         N_steps = hidden_dim // 2
         self.pe_layer = SinusoidalEmbedding2D(N_steps, normalize=True)
 
-        num_classes = config.model.sem_seg_head.num_classes
-        self.num_queries = config.model.mask_former.num_object_queries
+        num_classes = config.sem_seg_head.num_classes
+        self.num_queries = config.mask_former.num_object_queries
         # transformer parameters
-        self.num_heads = config.model.mask_former.nheads
-        dim_feedforward = config.model.mask_former.dim_feedforward
+        self.num_heads = config.mask_former.nheads
+        dim_feedforward = config.mask_former.dim_feedforward
         # NOTE: because we add learnable query features which requires supervision,
         # we add minus 1 to decoder layers to be consistent with our loss
         # implementation: that is, number of auxiliary losses is always
         # equal to number of decoder layers. With learnable query features, the number of
         # auxiliary losses equals number of decoders plus 1.
-        assert config.model.mask_former.dec_layers >= 1
-        self.num_layers = config.model.mask_former.dec_layers - 1
-        pre_norm = config.model.mask_former.pre_norm
-        enforce_input_project = config.model.mask_former.enforce_input_proj
-        mask_dim = config.model.sem_seg_head.mask_dim
+        assert config.mask_former.dec_layers >= 1
+        self.num_layers = config.mask_former.dec_layers - 1
+        pre_norm = config.mask_former.pre_norm
+        enforce_input_project = config.mask_former.enforce_input_proj
+        mask_dim = config.sem_seg_head.mask_dim
 
         self.transformer_self_attention_layers = nn.ModuleList()
         self.transformer_cross_attention_layers = nn.ModuleList()
@@ -922,25 +922,25 @@ class MaskFormerHead(nn.Module):
             transformer_in_feature: input feature name to the transformer_predictor
         """
         super().__init__()
-        input_shape = {k: v for k, v in input_shape.items() if k in config.model.sem_seg_head.in_features}
+        input_shape = {k: v for k, v in input_shape.items() if k in config.sem_seg_head.in_features}
         input_shape = sorted(input_shape.items(), key=lambda x: x[1]["stride"])
         self.in_features = [k for k, v in input_shape]
 
-        # self.ignore_value = config.model.sem_seg_head.ignore_value
+        # self.ignore_value = config.sem_seg_head.ignore_value
         # self.common_stride = 4
-        # self.loss_weight = config.model.seg_seg_head.loss_weight
-        self.transformer_in_feature = config.model.mask_former.transformer_in_feature
-        self.num_classes = config.model.sem_seg_head.num_classes
+        # self.loss_weight = config.seg_seg_head.loss_weight
+        self.transformer_in_feature = config.mask_former.transformer_in_feature
+        self.num_classes = config.sem_seg_head.num_classes
         self.pixel_decoder = MSDeformAttnPixelDecoder(config, input_shape)
 
-        if config.model.mask_former.transformer_in_feature == "transformer_encoder":
-            predictor_in_channels = config.model.sem_seg_head.convs_dim
-        elif config.model.mask_former.transformer_in_feature == "pixel_embedding":
-            predictor_in_channels = config.model.sem_seg_head.mask_dim
-        elif config.model.mask_former.transformer_in_feature == "multi_scale_pixel_decoder":  # for maskformer2
-            predictor_in_channels = config.model.sem_seg_head.convs_dim
+        if config.mask_former.transformer_in_feature == "transformer_encoder":
+            predictor_in_channels = config.sem_seg_head.convs_dim
+        elif config.mask_former.transformer_in_feature == "pixel_embedding":
+            predictor_in_channels = config.sem_seg_head.mask_dim
+        elif config.mask_former.transformer_in_feature == "multi_scale_pixel_decoder":  # for maskformer2
+            predictor_in_channels = config.sem_seg_head.convs_dim
         else:
-            predictor_in_channels = input_shape[config.model.mask_former.transformer_in_feature]["channels"]
+            predictor_in_channels = input_shape[config.mask_former.transformer_in_feature]["channels"]
         self.predictor = MultiScaleMaskedTransformerDecoder(config, predictor_in_channels, mask_classification=True)
     
     def forward(self, features, mask=None):
@@ -990,53 +990,45 @@ class MaskFormer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.backbone = D2SwinTransformer(
-            pretrain_img_size = config.model.swin.pretrain_img_size,
-            patch_size = config.model.swin.patch_size,
+            pretrain_img_size = config.swin.pretrain_img_size,
+            patch_size = config.swin.patch_size,
             in_chans = 3,
-            embed_dim = config.model.swin.embed_dim,
-            depths = config.model.swin.depths,
-            num_heads = config.model.swin.num_heads,
-            window_size = config.model.swin.window_size,
-            mlp_ratio = config.model.swin.mlp_ratio,
-            qkv_bias = config.model.swin.qkv_bias,
-            qk_scale = config.model.swin.qk_scale,
-            drop_rate = config.model.swin.drop_rate,
-            attn_drop_rate = config.model.swin.attn_drop_rate,
-            drop_path_rate = config.model.swin.drop_path_rate,
+            embed_dim = config.swin.embed_dim,
+            depths = config.swin.depths,
+            num_heads = config.swin.num_heads,
+            window_size = config.swin.window_size,
+            mlp_ratio = config.swin.mlp_ratio,
+            qkv_bias = config.swin.qkv_bias,
+            qk_scale = config.swin.qk_scale,
+            drop_rate = config.swin.drop_rate,
+            attn_drop_rate = config.swin.attn_drop_rate,
+            drop_path_rate = config.swin.drop_path_rate,
             norm_layer = nn.LayerNorm,
-            ape = config.model.swin.ape,
-            patch_norm = config.model.swin.patch_norm,
-            out_features = config.model.swin.out_features,
-            use_checkpoint = config.model.swin.use_checkpoint
+            ape = config.swin.ape,
+            patch_norm = config.swin.patch_norm,
+            out_features = config.swin.out_features,
+            use_checkpoint = config.swin.use_checkpoint
         )
         self.sem_seg_head = MaskFormerHead(config, self.backbone.output_shape())
         
-        self.num_queries = config.model.mask_former.num_object_queries
-        self.overlap_threshold = config.model.mask_former.test.overlap_threshold
-        self.object_mask_threshold = config.model.mask_former.test.object_mask_threshold
+        self.num_queries = config.mask_former.num_object_queries
+        self.overlap_threshold = config.mask_former.test.overlap_threshold
+        self.object_mask_threshold = config.mask_former.test.object_mask_threshold
         
-        self.dataset_id_to_contiguous_id = dict()
-        self.dataset_thing_ids = set()
-        for i, cat in enumerate(utils.get_obj_from_str(config.dataset_categories)):
-            self.dataset_id_to_contiguous_id[cat["id"]] = i
-            if cat["isthing"]:
-                self.dataset_thing_ids.add(cat["id"])
-        self.contiguous_id_to_dataset_id = {v: k for k, v in self.dataset_id_to_contiguous_id.items()}
-
-        if config.model.mask_former.size_divisibility < 0:
+        if config.mask_former.size_divisibility < 0:
             self.size_divisibility = self.backbone.size_divisibility
         else:
-            self.size_divisibility = config.model.mask_former.size_divisibility
+            self.size_divisibility = config.mask_former.size_divisibility
         self.sem_seg_postprocess_before_inference = (
-            config.model.mask_former.test.sem_seg_postprocessing_before_inference
-            or config.model.mask_former.test.panoptic_on
-            or config.model.mask_former.test.instance_on
+            config.mask_former.test.sem_seg_postprocessing_before_inference
+            or config.mask_former.test.panoptic_on
+            or config.mask_former.test.instance_on
         )
-        self.register_buffer("pixel_mean", torch.Tensor(config.model.pixel_mean).view(-1, 1, 1), False)
-        self.register_buffer("pixel_std", torch.Tensor(config.model.pixel_std).view(-1, 1, 1), False)
-        self.semantic_on = config.model.mask_former.test.semantic_on
-        self.instance_on = config.model.mask_former.test.instance_on
-        self.panoptic_on = config.model.mask_former.test.panoptic_on
+        self.register_buffer("pixel_mean", torch.Tensor(config.pixel_mean).view(-1, 1, 1), False)
+        self.register_buffer("pixel_std", torch.Tensor(config.pixel_std).view(-1, 1, 1), False)
+        self.semantic_on = config.mask_former.test.semantic_on
+        self.instance_on = config.mask_former.test.instance_on
+        self.panoptic_on = config.mask_former.test.panoptic_on
         self.test_topk_per_image = 10
     
     @property
@@ -1075,7 +1067,7 @@ class MaskFormer(nn.Module):
         outputs = self.sem_seg_head(features)
         return outputs
     
-    def inference(self, batch):
+    def inference(self, batch, contiguous_id_to_dataset_id, dataset_thing_ids):
         images = batch['image']
         outputs = self(batch)
 
@@ -1109,11 +1101,11 @@ class MaskFormer(nn.Module):
                 processed_results[-1]["sem_seg"] = r    # shape (class, h, w)
             
             if self.panoptic_on:
-                panoptic_r = self.panoptic_inference(mask_cls_result, mask_pred_result)
+                panoptic_r = self.panoptic_inference(mask_cls_result, mask_pred_result, contiguous_id_to_dataset_id, dataset_thing_ids)
                 processed_results[-1]["panoptic_seg"] = panoptic_r
             
             if self.instance_on:
-                instance_r = self.instance_inference(mask_cls_result, mask_pred_result)
+                instance_r = self.instance_inference(mask_cls_result, mask_pred_result, dataset_thing_ids)
                 processed_results[-1]["instances"] = instance_r
         
         return processed_results
@@ -1124,7 +1116,7 @@ class MaskFormer(nn.Module):
         semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
         return semseg
 
-    def panoptic_inference(self, mask_cls, mask_pred):
+    def panoptic_inference(self, mask_cls, mask_pred, contiguous_id_to_dataset_id, dataset_thing_ids):
         scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
         mask_pred = mask_pred.sigmoid()
 
@@ -1151,8 +1143,8 @@ class MaskFormer(nn.Module):
             stuff_memory_list = {}
             for k in range(cur_classes.shape[0]):    # for each query
                 pred_class = cur_classes[k].item()
-                pred_dataset_class = self.contiguous_id_to_dataset_id[int(pred_class)]
-                isthing = pred_dataset_class in self.dataset_thing_ids
+                pred_dataset_class = contiguous_id_to_dataset_id[int(pred_class)]
+                isthing = pred_dataset_class in dataset_thing_ids
                 mask_area = (cur_mask_ids == k).sum().item()
                 original_area = (cur_masks[k] >= 0.5).sum().item()
                 mask = (cur_mask_ids == k) & (cur_masks[k] >= 0.5)
@@ -1179,7 +1171,7 @@ class MaskFormer(nn.Module):
             
             return panoptic_seg, segments_info
     
-    def instance_inference(self, mask_cls, mask_pred):
+    def instance_inference(self, mask_cls, mask_pred, dataset_thing_ids):
         # mask_pred is already processed to have the same shape as original input
         image_size = mask_pred.shape[-2:]
 
@@ -1195,7 +1187,7 @@ class MaskFormer(nn.Module):
         if self.panoptic_on:
             keep = torch.zeros_like(scores_per_image).bool()
             for i, lab in enumerate(labels_per_image):
-                keep[i] = lab in self.dataset_thing_ids
+                keep[i] = lab in dataset_thing_ids
             scores_per_image = scores_per_image[keep]
             labels_per_image = labels_per_image[keep]
             mask_pred = mask_pred[keep]
