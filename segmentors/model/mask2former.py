@@ -1036,7 +1036,7 @@ class MaskFormer(nn.Module):
     def device(self):
         return self.pixel_mean.device
 
-    def forward(self, batch):
+    def forward(self, images):
         """
         Args:
             batched_inputs: a list, batched outputs of :class:`DatasetMapper`.
@@ -1062,7 +1062,6 @@ class MaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
-        images = batch['image']
         images = (images - self.pixel_mean) / self.pixel_std
         features = self.backbone(images)
         outputs = self.sem_seg_head(features)
@@ -1210,7 +1209,7 @@ class Trainer():
         self.model = DistributedDataParallel(_model, device_ids=[device])
 
         self.loss_fn = SetClassSegmentLoss(
-            loss_config.num_classes, loss_config.weight_empty_class,
+            model_config.sem_seg_head.num_classes, loss_config.weight_empty_class,
             loss_config.weight_class, loss_config.weight_bce, loss_config.weight_dice,
             loss_config.num_points, loss_config.oversample_ratio, loss_config.importance_sample_ratio
         )
@@ -1232,7 +1231,7 @@ class Trainer():
                     hyperparams["lr"] = hyperparams["lr"] * optimizer_config.backbone_multiplier
                 if "relative_position_bias_table" in module_param_name or "absolute_pos_embed" in module_param_name:
                     hyperparams["weight_decay"] = 0.0
-                if isinstance(module, [nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d]):
+                if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm, nn.LayerNorm, nn.InstanceNorm2d)):
                     hyperparams["weight_decay"] = optimizer_config.weight_decay_norm
                 if isinstance(module, nn.Embedding):
                     hyperparams["weight_decay"] = optimizer_config.weight_decay_embed
@@ -1241,6 +1240,7 @@ class Trainer():
         self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
             groups, optimizer_config.base_lr
         )
+        optimizer_config.lr_scheduler_params.T_max = optimizer_config.num_training_steps
         self.lr_scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
             self.optimizer, **optimizer_config.lr_scheduler_params
         )
@@ -1248,15 +1248,15 @@ class Trainer():
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer, start_factor=0.1, total_iters=optimizer_config.warmup
             )
-            lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
-                self.optimizer, [warmup_scheduler, lr_scheduler], milestones=[optimizer_config.warmup]
+            self.lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
+                self.optimizer, [warmup_scheduler, self.lr_scheduler], milestones=[optimizer_config.warmup]
             )
         
         # prepare metrics
         self.loss_meters = {
-            "loss_class": torch_utils.RunningStatistic(),
-            "loss_bce": torch_utils.RunningStatistic(),
-            "loss_dice": torch_utils.RunningStatistic()
+            "loss_class": torch_utils.RunningStatistic(device),
+            "loss_bce": torch_utils.RunningStatistic(device),
+            "loss_dice": torch_utils.RunningStatistic(device)
         }
         self.metric_pq = torchmetrics.detection.PanopticQuality()
     
@@ -1266,8 +1266,9 @@ class Trainer():
             self.loss_meters[key].reset()
     
     def train_step(self, batch, batch_idx, global_step):
-        batch_size = batch['image'].size(0)
-        outputs = self.model(batch)
+        batch_size = len(batch)
+        images = torch.stack([x["images"] for x in batch]).cuda()
+        outputs = self.model(images)
         if "instance" in batch:
             gt_instances = batch["instances"]
             targets = prepare_targets(gt_instances, images)

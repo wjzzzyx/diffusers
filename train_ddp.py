@@ -24,6 +24,17 @@ def seed_all(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def setup_logging(log_file):
+    formatter = logging.Formatter(
+        "%(asctime)s - Rank %(rank)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(file_handler)
+
+
 def main(args):
     # use cudnn benchmarking algorithm to select the best conv algorithm
     if torch.backends.cudnn.is_available():  # noqa
@@ -77,7 +88,8 @@ def main(args):
         shuffle=False,
         pin_memory=True,
         drop_last=True,
-        num_workers=0
+        num_workers=0,
+        collate_fn=utils.get_obj_from_str(config.data.train.collate_fn)
     )
     val_datasets = {cfg.name: utils.instantiate_from_config(cfg) for cfg in config.data.val}
     val_dataloaders = {
@@ -90,6 +102,8 @@ def main(args):
     }
 
     # prepare model
+    num_training_steps = config.train_config.num_epochs * len(train_dataloader)
+    config.trainer.optimizer_config.num_training_steps = num_training_steps
     trainer = utils.get_obj_from_str(config.trainer.target)(
         config.trainer.model_config,
         config.trainer.loss_config,

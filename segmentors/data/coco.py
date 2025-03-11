@@ -1,3 +1,7 @@
+import contextlib
+import io
+import logging
+import os
 from PIL import Image
 
 import torch
@@ -5,9 +9,12 @@ from torch.utils.data import Dataset
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
 import pycocotools
+import pycocotools.coco
 
-from segmentors.transform import RandomHorizontalFlip, LargeScaleJitter
+from segmentors.transform import Compose, RandomHorizontalFlip, LargeScaleJitter
 
+
+logger = logging.getLogger(__name__)
 
 # All coco categories, together with their nice-looking visualization colors
 # It's from https://github.com/cocodataset/panopticapi/blob/master/panoptic_coco_categories.json
@@ -272,13 +279,15 @@ def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_ke
                     f"One annotation of image {image_id} contains empty 'bbox' value! "
                     "This json does not have valid COCO format."
                 )
+            obj["bbox"][2] = obj["bbox"][0] + obj["bbox"][2]
+            obj["bbox"][3] = obj["bbox"][1] + obj["bbox"][3]
 
             segm = anno.get("segmentation", None)
             if segm:  # either list[list[float]] or dict(RLE)
                 if isinstance(segm, dict):
                     if isinstance(segm["counts"], list):
                         # convert to compressed RLE
-                        segm = mask_util.frPyObjects(segm, *segm["size"])
+                        segm = pycocotools.mask.frPyObjects(segm, *segm["size"])
                 else:
                     # filter out invalid polygons (< 3 points)
                     segm = [poly for poly in segm if len(poly) % 2 == 0 and len(poly) >= 6]
@@ -298,7 +307,6 @@ def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_ke
                         keypts[idx] = v + 0.5
                 obj["keypoints"] = keypts
 
-            obj["bbox_mode"] = BoxMode.XYWH_ABS
             objs.append(obj)
         record["annotations"] = objs
         dataset_dicts.append(record)
@@ -327,22 +335,30 @@ def convert_polygons_to_mask(polygons: list[torch.Tensor], height, width):
 
 def get_bbox_from_mask(mask: torch.Tensor):
     ys, xs = torch.nonzero(mask, as_tuple=True)
-    return torch.tensor([xs.min(), ys.min(), xs.max(), ys.max()])
+    if len(xs) > 0 and len(ys) > 0:
+        return torch.tensor([xs.min(), ys.min(), xs.max(), ys.max()])
+    else:
+        return torch.tensor([0., 0., 0., 0.])
 
 
 def filter_empty_instances(classes: torch.Tensor, bboxes: torch.Tensor, masks: torch.Tensor):
     keep = ((bboxes[:, 2] - bboxes[:, 0]) > 1e-5) & ((bboxes[:, 3] - bboxes[:, 1]) > 1e-5)
-    keep &= masks.any(dim=(1, 2))
+    keep &= masks.any(dim=(1, 2)).bool()
     return classes[keep], bboxes[keep], masks[keep]
 
 
 class COCOInstanceDataset(Dataset):
-    def __init__(self, data_dir, json_file):
-        self.data = load_coco_json(json_file, data_dir, )
-        self.transform = T.Compose([
-            RandomHorizontalFlip(),
-            LargeScaleJitter(),
-        ])
+    def __init__(self, data_dir, json_file, mode, target_size=1024):
+        self.data = load_coco_json(json_file, data_dir)
+        self.mode = mode
+        if self.mode == "train":
+            self.target_size = target_size
+            self.transform = T.Compose([
+                RandomHorizontalFlip(),
+                LargeScaleJitter(target_size),
+            ])
+        else:
+            self.transform = None
     
     def __len__(self):
         return len(self.data)
@@ -353,25 +369,37 @@ class COCOInstanceDataset(Dataset):
         if image.width != info["width"] or image.height != info["height"]:
             raise ValueError("Image size mismatch with info.")
         image = TF.pil_to_tensor(image)
+        
+        if self.mode != "train":
+            return {
+                "image_id": info["image_id"],
+                "image_fname": info["file_name"],
+                "height": info["height"],
+                "width": info["width"],
+                "image": image,
+            }
+        
+        height, width = image.shape[-2:]
+        padding_mask = torch.ones((1, height, width), dtype=torch.uint8)
         annos = info["annotations"]
         annos = [obj for obj in annos if obj.get("iscrowd", 0) == 0]    # how many bboxes and polygons if iscrowd?
-        self.transform.reset()
-        image = self.transform(image=image)
-        padding_mask = torch.ones(image.shape[-2:])
-        padding_mask = self.transform(mask=padding_mask)["mask"]
+        self.transform.reset(image)
+        image = self.transform({"image": image})["image"]
+        padding_mask = self.transform({"mask": padding_mask})["mask"]
         padding_mask = ~padding_mask.bool()
         augs = list()
         for obj in annos:
+            bboxes = torch.as_tensor(obj["bbox"]).unsqueeze(0)
             raw_mask = obj["segmentation"]
             if isinstance(raw_mask, list):    # a list of polygons
                 polygons = [torch.as_tensor(p).view(-1, 2) for p in raw_mask]
-                augs.append(self.transform(bboxes=bboxes, polygons=polygons))
+                augs.append(self.transform({"bboxes": bboxes, "polygons": polygons}))
                 augs[-1]["mask"] = convert_polygons_to_mask(
-                    augs[-1].pop("polygons"), image.height, image.width
+                    augs[-1].pop("polygons"), self.target_size, self.target_size
                 )
             elif isinstance(raw_mask, dict):    # rle
                 mask = pycocotools.mask.decode(raw_mask)
-                augs.append(self.transform(bboxes=bboxes, mask=mask))
+                augs.append(self.transform({"bboxes": bboxes, "mask": mask}))
         
         classes = torch.tensor([obj["category_id"] for obj in annos])
         # bboxes = torch.stack([obj["bbox"] for obj in augs])
@@ -391,3 +419,7 @@ class COCOInstanceDataset(Dataset):
             "masks": masks,
             "padding_mask": padding_mask
         }
+
+
+def collate_fn(batch):
+    return batch

@@ -4,8 +4,15 @@ from PIL import Image
 import random
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
 from typing import Union, Sequence
+
+
+class Compose(T.Compose):
+    def reset(self, *args, **kwargs):
+        for t in self.transforms:
+            t.reset(*args, **kwargs)
 
 
 class LargeScaleJitter():
@@ -18,59 +25,62 @@ class LargeScaleJitter():
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
     
-    def reset(self):
+    def reset(self, image):
+        # scale parameters
         self.random_scale = torch.rand(1) * (self.aug_scale_max - self.aug_scale_min) + self.aug_scale_min
-    
+        image_size = torch.tensor(image.shape[-2:])
+        scaled_size = (self.target_size * self.random_scale).round()
+        # the longer side is scaled to scaled_size
+        self.scale = torch.min(scaled_size / image_size)
+        self.scaled_size = (image_size * self.scale).round().long()
+        # crop parameters
+        self.crop_size = torch.minimum(self.target_size, self.scaled_size)
+        margin_h = (self.scaled_size[0] - self.crop_size[0]).item()
+        margin_w = (self.scaled_size[1] - self.crop_size[1]).item()
+        offset_h = np.random.randint(0, margin_h + 1)
+        offset_w = np.random.randint(0, margin_w + 1)
+        self.crop_y1, self.crop_y2 = offset_h, offset_h + self.crop_size[0].item()
+        self.crop_x1, self.crop_x2 = offset_w, offset_w + self.crop_size[1].item()
+
     def __call__(self, sample):
-        # points: (x, y)
-        # bboxes: (x, y, x, y)
-        image = sample["image"]
+        # bboxes: tensor([[x, y, x, y]])
+        # polygons: [tensor([x, y, ...]), ...]
+        image = sample["image"] if "image" in sample else None
         bboxes = sample["bboxes"] if "bboxes" in sample else None
         polygons = sample["polygons"] if "polygons" in sample else None
         mask = sample["mask"] if "mask" in sample else None
 
-        image_size = torch.tensor(image.shape[-2:])
-        scaled_size = (self.target_size * self.random_scale).round()
-        # the longer side is scaled to scaled_size
-        scale = torch.min(scaled_size / image_size)
-        scaled_size = (image_size * scale).round().long()
-
         # resize image and annos
-        scaled_image = F.interpolate(image.unsqueeze(0), scaled_size.tolist(), mode='bilinear').squeeze(0)
+        if image is not None:
+            image = F.interpolate(image.unsqueeze(0), self.scaled_size.tolist(), mode='bilinear').squeeze(0)
         if bboxes is not None:
-            bboxes *= scale
+            bboxes *= self.scale
         if polygons is not None:
             for ipoly in range(len(polygons)):
-                polygons[ipoly] *= scale
+                polygons[ipoly] *= self.scale
         if mask is not None:
-            mask = F.interpolate(mask.unsqueeze(0), scaled_size.tolist(), mode='nearest').squeeze(0)
+            mask = F.interpolate(mask.unsqueeze(0), self.scaled_size.tolist(), mode='nearest').squeeze(0)
 
         # random crop
-        crop_size = torch.minimum(self.target_size, scaled_size)
-        margin_h = (scaled_size[0] - crop_size[0]).item()
-        margin_w = (scaled_size[1] - crop_size[1]).item()
-        offset_h = np.random.randint(0, margin_h + 1)
-        offset_w = np.random.randint(0, margin_w + 1)
-        crop_y1, crop_y2 = offset_h, offset_h + crop_size[0].item()
-        crop_x1, crop_x2 = offset_w, offset_w + crop_size[1].item()
-
-        scaled_image = scaled_image[:, crop_y1:crop_y2, crop_x1:crop_x2]
+        if image is not None:
+            image = image[:, self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
         if bboxes is not None:
-            bboxes[:, 0] = (bboxes[:, 0] - crop_x1).clamp(min=0, max=self.target_size[1])
-            bboxes[:, 1] = (bboxes[:, 1] - crop_y1).clamp(min=0, max=self.target_size[0])
-            bboxes[:, 2] = (bboxes[:, 2] - crop_x1).clamp(min=0, max=self.target_size[1])
-            bboxes[:, 3] = (bboxes[:, 3] - crop_y1).clamp(min=0, max=self.target_size[0])
+            bboxes[:, 0] = (bboxes[:, 0] - self.crop_x1).clamp(min=0, max=self.target_size[1])
+            bboxes[:, 1] = (bboxes[:, 1] - self.crop_y1).clamp(min=0, max=self.target_size[0])
+            bboxes[:, 2] = (bboxes[:, 2] - self.crop_x1).clamp(min=0, max=self.target_size[1])
+            bboxes[:, 3] = (bboxes[:, 3] - self.crop_y1).clamp(min=0, max=self.target_size[0])
         if polygons is not None:
             for poly in polygons:
-                poly[:, 0] = (poly[:, 0] - crop_x1).clamp(min=0, max=self.target_size[1])
-                poly[:, 1] = (poly[:, 1] - crop_y1).clamp(min=0, max=self.target_size[0])
+                poly[:, 0] = (poly[:, 0] - self.crop_x1).clamp(min=0, max=self.target_size[1])
+                poly[:, 1] = (poly[:, 1] - self.crop_y1).clamp(min=0, max=self.target_size[0])
         if mask is not None:
-            mask = mask[:, crop_y1:crop_y2, crop_x1:crop_x2]
+            mask = mask[:, self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
 
         # pad
-        padding_h = max(self.target_size[0] - scaled_image.size(1), 0).item()
-        padding_w = max(self.target_size[1] - scaled_image.size(2), 0).item()
-        image = F.pad(scaled_image, [0, padding_w, 0, padding_h], value=128)
+        padding_h = max(self.target_size[0] - self.crop_size[0], 0).item()
+        padding_w = max(self.target_size[1] - self.crop_size[1], 0).item()
+        if image is not None:
+            image = F.pad(image, [0, padding_w, 0, padding_h], value=128)
         if mask is not None:
             # TODO mask padding value?
             mask = F.pad(mask, [0, padding_w, 0, padding_h], value=0)
@@ -214,24 +224,24 @@ class RandomHorizontalFlip():
     def __init__(self, p: float = 0.5):
         self.p = p
     
-    def reset(self):
+    def reset(self, image):
         self.do_flip = random.random() < self.p
+        self.height, self.width = image.shape[-2:]
     
     def __call__(self, sample):
         if self.do_flip:
-            image = sample["image"]
+            image = sample["image"] if "image" in sample else None
             bboxes = sample["bboxes"] if "bboxes" in sample else None
             polygons = sample["polygons"] if "polygons" in sample else None
             mask = sample["mask"] if "mask" in sample else None
 
-            image = TF.horizontal_flip(image)
-            height, width = image.shape[-2:]
+            if image is not None:
+                image = TF.horizontal_flip(image)
             if bboxes is not None:
-                bboxes[:, 0] = width - bboxes[:, 2]
-                bboxes[:, 2] = width - bboxes[:, 0]
+                bboxes[:, 0], bboxes[:, 2] = self.width - bboxes[:, 2], self.width - bboxes[:, 0]
             if polygons is not None:
                 for poly in polygons:
-                    poly[:, 0] = width - poly[:, 0]
+                    poly[:, 0] = self.width - poly[:, 0]
             if mask is not None:
                 mask = TF.horizontal_flip(mask)
             

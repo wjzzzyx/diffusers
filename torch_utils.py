@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 from typing import Any, Dict
 
 
@@ -82,13 +83,14 @@ def count_params(model):
 
 
 class RunningStatistic():
-    def __init__(self):
+    def __init__(self, device):
+        self.device = device
         self.reset()
     
     def reset(self):
-        self.sum = 0
-        self.count = 0
-        self.val = 0
+        self.sum = torch.tensor(0, device=self.device)
+        self.count = torch.tensor(0, device=self.device)
+        self.val = torch.tensor(0, device=self.device)
     
     def update(self, val, n):
         # val is the mean over n counts
@@ -98,11 +100,7 @@ class RunningStatistic():
     
     def compute(self):
         if dist.is_available() and dist.is_initialized():
-            sum_t = torch.tensor(self.sum)
-            count_t = torch.tensor(self.count)
-            dist.reduce(sum_t, dst=0, op=dist.ReduceOp.SUM)
-            dist.reduce(count_t, dst=0, op=dist.ReduceOp.SUM)
-            mean = sum_t.item() / count_t.item()
-        else:
-            mean = self.sum / self.count
+            dist.reduce(self.sum, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(self.count, dst=0, op=dist.ReduceOp.SUM)
+        mean = self.sum / self.count
         return mean

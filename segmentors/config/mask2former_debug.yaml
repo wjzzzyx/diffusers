@@ -15,13 +15,44 @@ trainer:
       mask_dim: 256
       deformable_transformer_encoder_in_features: ["res3", "res4", "res5"]
       transformer_enc_layers: 6
+      common_stride: 4
+      norm: "GN"
     mask_former:
       transformer_in_feature: multi_scale_pixel_decoder
       deep_supervision: True
       hidden_dim: 256
+      num_object_queries: 100
       nheads: 8
       dim_feedforward: 2048
       dec_layers: 10
+      dropout: 0.0
+      pre_norm: false
+      enforce_input_proj: false
+      size_divisibility: 32
+      test:
+        overlap_threshold: 0.8
+        object_mask_threshold: 0.8
+        sem_seg_postprocessing_before_inference: false
+        semantic_on: false
+        instance_on: true
+        panoptic_on: false
+    swin:
+      pretrain_img_size: 384
+      patch_size: 4
+      embed_dim: 128
+      depths: [2, 2, 18, 2]
+      num_heads: [4, 8, 16, 32]
+      window_size: 12
+      mlp_ratio: 4.0
+      qkv_bias: true
+      qk_scale: null
+      drop_rate: 0.0
+      attn_drop_rate: 0.0
+      drop_path_rate: 0.3
+      ape: false
+      patch_norm: true
+      out_features: ["res2", "res3", "res4", "res5"]
+      use_checkpoint: false
   loss_config:
     weight_empty_class: 0.1
     weight_class: 2.0
@@ -33,10 +64,13 @@ trainer:
   optimizer_config:
     optimizer: torch.optim.AdamW
     base_lr: 0.0001
+    backbone_multiplier: 0.1
     weight_decay: 0.05
-    weight_decay_norm: 
-    weight_decay_embed: 
+    weight_decay_norm: 0.0
+    weight_decay_embed: 0.0
     lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+    lr_scheduler_params:
+      T_max: 100000
     warmup: 10
 
 data:
@@ -46,14 +80,18 @@ data:
   train:
     target: segmentors.data.coco.COCOInstanceDataset
     params:
-      data_dir:
-      json_file:
+      data_dir: /mnt/sdb/data_coco/train2017
+      json_file: /mnt/sdb/data_coco/annotations/instances_train2017.json
+      mode: train
+      target_size: 1024
+    collate_fn: segmentors.data.coco.collate_fn
   val:
     - name: 
       target: segmentors.data.coco.COCOInstanceDataset
       params:
-        data_dir:
-        json_file:
+        data_dir: /mnt/sdb/data_coco/val2017
+        json_file: /mnt/sdb/data_coco/annotations/instances_val2017.json
+        mode: val
 
 train_config:
   num_epochs: 100
