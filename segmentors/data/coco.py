@@ -155,7 +155,7 @@ COCO_CATEGORIES = [
 ]
 
 
-def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
+def load_coco_json(json_file, image_root):
     """
     Load a json file with COCO's instances annotation format.
     Currently supports instance detection, instance segmentation,
@@ -193,12 +193,10 @@ def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_ke
     with contextlib.redirect_stdout(io.StringIO()):
         coco_api = pycocotools.coco.COCO(json_file)
     
-    id_map = None
-    if dataset_name is not None:
-        cat_ids = sorted(coco_api.getCatIds())
-        cats = coco_api.loadCats(cat_ids)
-        # The categories in a custom json file may not be sorted.
-        thing_classes = [c["name"] for c in sorted(cats, key=lambda x: x["id"])]
+    cat_ids = sorted(coco_api.getCatIds())
+    cats = coco_api.loadCats(cat_ids)
+    # The categories in a custom json file may not be sorted.
+    thing_classes = [c["name"] for c in sorted(cats, key=lambda x: x["id"])]
 
     # sort indices for reproducible results
     img_ids = sorted(coco_api.imgs.keys())
@@ -249,7 +247,7 @@ def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_ke
 
     dataset_dicts = []
 
-    ann_keys = ["iscrowd", "bbox", "keypoints", "category_id"] + (extra_annotation_keys or [])
+    ann_keys = ["iscrowd", "bbox", "keypoints", "category_id"]
 
     num_instances_without_valid_segmentation = 0
 
@@ -308,8 +306,10 @@ def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_ke
                 obj["keypoints"] = keypts
 
             objs.append(obj)
-        record["annotations"] = objs
-        dataset_dicts.append(record)
+        
+        if len(objs) > 0:
+            record["annotations"] = objs
+            dataset_dicts.append(record)
 
     if num_instances_without_valid_segmentation > 0:
         logger.warning(
@@ -319,7 +319,7 @@ def load_coco_json(json_file, image_root, dataset_name=None, extra_annotation_ke
             + "There might be issues in your dataset generation process.  Please "
             "check https://detectron2.readthedocs.io/en/latest/tutorials/datasets.html carefully"
         )
-    return dataset_dicts
+    return cat_ids, dataset_dicts
 
 
 def convert_polygons_to_mask(polygons: list[torch.Tensor], height, width):
@@ -349,7 +349,7 @@ def filter_empty_instances(classes: torch.Tensor, bboxes: torch.Tensor, masks: t
 
 class COCOInstanceDataset(Dataset):
     def __init__(self, data_dir, json_file, mode, target_size=1024):
-        self.data = load_coco_json(json_file, data_dir)
+        self.cat_ids, self.data = load_coco_json(json_file, data_dir)
         self.mode = mode
         if self.mode == "train":
             self.target_size = target_size
@@ -359,6 +359,7 @@ class COCOInstanceDataset(Dataset):
             ])
         else:
             self.transform = None
+        self.dataset_id_to_contiguous_id = {c: i for i, c in enumerate(self.cat_ids)}
     
     def __len__(self):
         return len(self.data)
@@ -401,7 +402,9 @@ class COCOInstanceDataset(Dataset):
                 mask = pycocotools.mask.decode(raw_mask)
                 augs.append(self.transform({"bboxes": bboxes, "mask": mask}))
         
-        classes = torch.tensor([obj["category_id"] for obj in annos])
+        classes = torch.tensor([
+            self.dataset_id_to_contiguous_id[obj["category_id"]] for obj in annos
+        ])
         # bboxes = torch.stack([obj["bbox"] for obj in augs])
         # transform may cause the bbox to be loose
         bboxes = torch.stack([get_bbox_from_mask(obj["mask"]) for obj in augs])

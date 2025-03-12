@@ -288,7 +288,7 @@ class D2SwinTransformer(nn.Module):
                 norm_layer = getattr(self, f"norm{i}")
                 x_out = norm_layer(x_out)
 
-                outs["res{}".format(i + 2)] = x_out.permute(0, 3, 1, 2)
+                outs["res{}".format(i + 2)] = x_out.permute(0, 3, 1, 2).contiguous()
 
         outs = {k: v for k, v in outs.items() if k in self._out_features}
         return outs
@@ -1212,7 +1212,7 @@ class Trainer():
             model_config.sem_seg_head.num_classes, loss_config.weight_empty_class,
             loss_config.weight_class, loss_config.weight_bce, loss_config.weight_dice,
             loss_config.num_points, loss_config.oversample_ratio, loss_config.importance_sample_ratio
-        )
+        ).cuda()
 
         # prepare optimizers
         defaults = {"lr": optimizer_config.base_lr, "weight_decay": optimizer_config.weight_decay}
@@ -1258,6 +1258,12 @@ class Trainer():
             "loss_bce": torch_utils.RunningStatistic(device),
             "loss_dice": torch_utils.RunningStatistic(device)
         }
+        if loss_config.deep_supervision:
+            for i in range(model_config.mask_former.dec_layers - 1):
+                self.loss_meters[f"loss_class_{i}"] = torch_utils.RunningStatistic(device)
+                self.loss_meters[f"loss_bce_{i}"] = torch_utils.RunningStatistic(device)
+                self.loss_meters[f"loss_dice_{i}"] = torch_utils.RunningStatistic(device)
+        
         self.metric_pq = torchmetrics.detection.PanopticQuality()
     
     def on_train_epoch_start(self):
@@ -1269,26 +1275,24 @@ class Trainer():
         batch_size = len(batch)
         images = torch.stack([x["images"] for x in batch]).cuda()
         outputs = self.model(images)
-        if "instance" in batch:
-            gt_instances = batch["instances"]
-            targets = prepare_targets(gt_instances, images)
-        else:
-            targets = None
-        
-        loss_dict = self.loss_fn(outputs, targets)
-        loss = loss_dict["loss_class"] * self.loss_config.weight_class
-        loss += loss_dict["loss_bce"] * self.loss_config.weight_bce
-        loss += loss_dict["loss_dice"] * self.loss_config.weight_dice
+
+        gt_classes = [x["classes"].cuda() for x in batch]
+        gt_masks = [x["masks"].cuda() for x in batch]
+        loss_dict = self.loss_fn(
+            outputs["pred_logits"], outputs["pred_masks"],
+            gt_classes, gt_masks, outputs["aux_outputs"]
+        )
+        loss = sum(loss_dict.values())
 
         loss.backward()
-        all_params = itertools.chain(x["params"] for x in self.optimizer.param_groups)
-        nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+        all_params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
+        nn.utils.clip_grad_norm_(all_params, max_norm=0.01)
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self.lr_scheduler.step()
 
         for key, value in loss_dict.items():
-            self.loss_meters[key].update(value.item(), batch_size)
+            self.loss_meters[key].update(value.detach(), batch_size)
         
     def on_train_epoch_end(self, epoch):
         logdict = dict()

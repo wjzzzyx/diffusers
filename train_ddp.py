@@ -9,9 +9,9 @@ import numpy as np
 from omegaconf import OmegaConf
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 import utils
 
@@ -129,7 +129,7 @@ def train(
     for epoch in range(start_epoch, train_config.num_epochs + 1):
         train_dataloader.sampler.set_epoch(epoch)
         trainer.on_train_epoch_start()
-        for batch_idx, batch in enumerate(train_dataloader):
+        for batch_idx, batch in tqdm(enumerate(train_dataloader), desc=f"Epoch {epoch}", total=len(train_dataloader)):
             trainer.train_step(batch, batch_idx, global_step)
             global_step += 1
         logdict = trainer.on_train_epoch_end(epoch)

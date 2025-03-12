@@ -54,6 +54,7 @@ trainer:
       out_features: ["res2", "res3", "res4", "res5"]
       use_checkpoint: false
   loss_config:
+    deep_supervision: true
     weight_empty_class: 0.1
     weight_class: 2.0
     weight_bce: 5.0
