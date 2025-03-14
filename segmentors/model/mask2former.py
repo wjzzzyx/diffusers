@@ -1,10 +1,13 @@
 import copy
 import itertools
 import logging
+import os
+from PIL import Image
 from typing import List, Dict, Optional
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -1273,7 +1276,7 @@ class Trainer():
     
     def train_step(self, batch, batch_idx, global_step):
         batch_size = len(batch)
-        images = torch.stack([x["images"] for x in batch]).cuda()
+        images = torch.stack([x["image"] for x in batch]).cuda()
         outputs = self.model(images)
 
         gt_classes = [x["classes"].cuda() for x in batch]
@@ -1293,6 +1296,8 @@ class Trainer():
 
         for key, value in loss_dict.items():
             self.loss_meters[key].update(value.detach(), batch_size)
+        
+        return outputs
         
     def on_train_epoch_end(self, epoch):
         logdict = dict()
@@ -1319,3 +1324,47 @@ class Trainer():
         logdict[f"val/sq"] = quality[1].item()
         logdict[f"val/rq"] = quality[2].item()
         return logdict
+    
+    def log_step(self, batch, output, logdir, global_step, epoch, batch_idx):
+        if dist.get_rank() == 0:
+            self.log_image(batch, output, logdir, global_step, epoch, batch_idx)
+
+    def log_image(self, batch, output, logdir, global_step, epoch, batch_idx):
+        from segmentors.data.coco import COCO_CATEGORIES
+        dirname = os.path.join(logdir, "log_images")
+        os.makedirs(dirname, exist_ok=True)
+
+        images = [x["image"] for x in batch]
+        gt_classes = [x["classes"] for x in batch]
+        gt_masks = [x["masks"] for x in batch]
+        pred_logits = output["pred_logits"][:, :, :-1]
+        pred_scores, pred_classes = pred_logits.max(dim=-1)
+        pred_masks = output["pred_masks"]
+        pred_scores, topk_index = pred_scores.topk(10, dim=1)    # shape (batch, k)
+        pred_classes = torch.gather(pred_classes, 1, topk_index)
+        batch_index = torch.arange(topk_index.size(0)).unsqueeze(1)
+        pred_masks = pred_masks[batch_index, topk_index]
+        pred_masks = F.interpolate(pred_masks, scale_factor=4, model="bilinear")
+        pred_classes = pred_classes.cpu().numpy()
+        pred_masks = pred_masks.detach().cpu().numpy()
+
+        for i, (image, gt_class, gt_mask, pred_class, pred_mask) in enumerate(
+            zip(images, gt_classes, gt_masks, pred_classes, pred_masks)):
+            image = image.permute(1, 2, 0).cpu().numpy()
+            mask = np.array(image.shape, dtype="uint8")
+            for c, m in zip(gt_class, gt_mask.cpu().numpy()):
+                color = COCO_CATEGORIES[c]["color"]
+                mask[m > 0] = color
+            Image.fromarray(image).save(
+                os.path.join(dirname, f"gs{global_step}-e{epoch}-{i}_image.png")
+            )
+            Image.fromarray(mask).save(
+                os.path.join(dirname, f"gs{global_step}-e{epoch}-{i}_mask.png")
+            )
+            mask = np.zeros(image.shape, dtype="uint8")
+            for c, m in zip(pred_class, pred_mask):
+                color = COCO_CATEGORIES[c]["color"]
+                mask[m > 0] = color
+            Image.fromarray(mask).save(
+                os.path.join(dirname, f"gs{global_step}-e{epoch}-{i}_pred.png")
+            )

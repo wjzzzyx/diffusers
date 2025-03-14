@@ -130,8 +130,11 @@ def train(
         train_dataloader.sampler.set_epoch(epoch)
         trainer.on_train_epoch_start()
         for batch_idx, batch in tqdm(enumerate(train_dataloader), desc=f"Epoch {epoch}", total=len(train_dataloader)):
-            trainer.train_step(batch, batch_idx, global_step)
+            output = trainer.train_step(batch, batch_idx, global_step)
             global_step += 1
+            if global_step % train_config.log_interval == 0:
+                trainer.log_step(batch, output, args.logdir, global_step, epoch, batch_idx)
+                dist.barrier()
         logdict = trainer.on_train_epoch_end(epoch)
         if dist.get_rank() == 0:
             logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
