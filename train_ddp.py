@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import utils
@@ -75,6 +76,8 @@ def main(args):
         )
         logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     
+    writer = SummaryWriter(args.logdir) if rank == 0 else None
+    
     logging.info(f"Using distributed training with {world_size} GPU(s).")
 
     seed_all(config.trainer.seed)
@@ -112,8 +115,10 @@ def main(args):
     )
     
     train_config = config.pop("train_config")
-    train(args, train_config, trainer, train_dataloader, val_dataloaders)
+    train(args, train_config, trainer, train_dataloader, val_dataloaders, writer)
 
+    if rank == 0:
+        writer.close()
     dist.destroy_process_group()
 
 
@@ -123,6 +128,7 @@ def train(
     trainer,
     train_dataloader,
     val_dataloaders,
+    writer
 ):
     global_step = 0
     start_epoch = 1
@@ -133,11 +139,14 @@ def train(
             output = trainer.train_step(batch, batch_idx, global_step)
             global_step += 1
             if global_step % train_config.log_interval == 0:
-                trainer.log_step(batch, output, args.logdir, global_step, epoch, batch_idx)
+                logdict = trainer.log_step(batch, output, args.logdir, global_step, epoch, batch_idx)
+                if dist.get_rank() == 0:
+                    for key, val in logdict.items():
+                        writer.add_scalar(f"{key}/train", val, global_step)
                 dist.barrier()
         logdict = trainer.on_train_epoch_end(epoch)
-        if dist.get_rank() == 0:
-            logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
+        # if dist.get_rank() == 0:
+        #     logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
         
         if epoch % train_config.eval_interval == 0:
             datasets_results = eval(trainer, val_dataloaders)

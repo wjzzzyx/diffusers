@@ -100,7 +100,9 @@ class RunningStatistic():
     
     def compute(self):
         if dist.is_available() and dist.is_initialized():
-            dist.reduce(self.sum, dst=0, op=dist.ReduceOp.SUM)
-            dist.reduce(self.count, dst=0, op=dist.ReduceOp.SUM)
+            # dist.reduce(self.sum, dst=0, op=dist.ReduceOp.SUM)
+            # dist.reduce(self.count, dst=0, op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.count, op=dist.ReduceOp.SUM)
         mean = self.sum / self.count
         return mean

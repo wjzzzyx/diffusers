@@ -1300,11 +1300,7 @@ class Trainer():
         return outputs
         
     def on_train_epoch_end(self, epoch):
-        logdict = dict()
-        for key in self.loss_meters:
-            val = self.loss_meters[key].compute()
-            logdict[f"train/{key}"] = val
-        return logdict
+        return dict()
     
     def on_val_epoch_start(self):
         self.model.eval()
@@ -1326,8 +1322,14 @@ class Trainer():
         return logdict
     
     def log_step(self, batch, output, logdir, global_step, epoch, batch_idx):
+        logdict = dict()
+        for key in self.loss_meters.keys():
+            val = self.loss_meters[key].compute()
+            logdict[key] = val.item()
+            self.loss_meters[key].reset()
         if dist.get_rank() == 0:
             self.log_image(batch, output, logdir, global_step, epoch, batch_idx)
+        return logdict
 
     def log_image(self, batch, output, logdir, global_step, epoch, batch_idx):
         from segmentors.data.coco import COCO_CATEGORIES
