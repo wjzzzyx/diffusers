@@ -25,15 +25,22 @@ def seed_all(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def setup_logging(log_file):
+def setup_logging(log_file, rank):
     formatter = logging.Formatter(
         "%(asctime)s - Rank %(rank)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(formatter)
-    root_logger = logging.getLogger()
-    root_logger.addHandler(file_handler)
+    logger = logging.getLogger(__name__)
+    if rank == 0:
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+    else:
+        logger.disabled = True
+    return logger
 
 
 def main(args):
@@ -65,8 +72,7 @@ def main(args):
         os.makedirs(args.logdir, exist_ok=True)
         os.makedirs(args.ckptdir, exist_ok=True)
         os.makedirs(args.cfgdir, exist_ok=True)
-        print('Project config')
-        print(OmegaConf.to_yaml(config))
+
         OmegaConf.save(config, os.path.join(args.cfgdir, f'{args.now}.yaml'))
         
         logging.basicConfig(
@@ -78,6 +84,7 @@ def main(args):
     
     writer = SummaryWriter(args.logdir) if rank == 0 else None
     
+    logging.info("Project config" + "\n" + OmegaConf.to_yaml(config))
     logging.info(f"Using distributed training with {world_size} GPU(s).")
 
     seed_all(config.trainer.seed)
