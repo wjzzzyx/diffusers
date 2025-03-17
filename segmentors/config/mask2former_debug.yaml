@@ -37,6 +37,7 @@ trainer:
         instance_on: true
         panoptic_on: false
     swin:
+      pretrained: ""
       pretrain_img_size: 384
       patch_size: 4
       embed_dim: 128

@@ -157,6 +157,7 @@ class D2SwinTransformer(nn.Module):
         out_features=["res2", "res3", "res4", "res5"],
         frozen_stages=-1,
         use_checkpoint=False,
+        pretrained=""
     ):
         super().__init__()
 
@@ -243,6 +244,10 @@ class D2SwinTransformer(nn.Module):
             "res4": self.num_features[2],
             "res5": self.num_features[3],
         }
+
+        if pretrained:
+            checkpoint = torch.load(pretrained, map_location="cpu", weights_only=True)
+            missing, unexpected = self.load_state_dict(checkpoint["model"], strict=False)
 
     def _freeze_stages(self):
         if self.frozen_stages >= 0:
@@ -1011,7 +1016,8 @@ class MaskFormer(nn.Module):
             ape = config.swin.ape,
             patch_norm = config.swin.patch_norm,
             out_features = config.swin.out_features,
-            use_checkpoint = config.swin.use_checkpoint
+            use_checkpoint = config.swin.use_checkpoint,
+            pretrained=config.swin.pretrained
         )
         self.sem_seg_head = MaskFormerHead(config, self.backbone.output_shape())
         
