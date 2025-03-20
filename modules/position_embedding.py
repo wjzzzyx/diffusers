@@ -66,8 +66,8 @@ class SinusoidalEmbedding2D(nn.Module):
     
     def forward(self, x):
         height, width = x.size(2), x.size(3)
-        pos_x = torch.arange(width, dtype=torch.float, device=x.device)
-        pos_y = torch.arange(height, dtype=torch.float, device=x.device)
+        pos_x = torch.arange(1, width + 1, dtype=torch.float, device=x.device)
+        pos_y = torch.arange(1, height + 1, dtype=torch.float, device=x.device)
         if self.normalize:
             pos_x = pos_x / width * self.scale
             pos_y = pos_y / height * self.scale
