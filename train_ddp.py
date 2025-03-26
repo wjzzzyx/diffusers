@@ -108,6 +108,7 @@ def main(args):
             batch_size=config.data.val_batch_size,
             shuffle=False,
             num_workers=config.data.num_workers,
+            collate_fn=utils.get_obj_from_str(config.data.val[0].collate_fn)
         ) for name, val_dataset in val_datasets.items()
     }
 
@@ -156,8 +157,8 @@ def train(
         #     logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
         
         if epoch % train_config.eval_interval == 0:
-            datasets_results = eval(trainer, val_dataloaders)
             if dist.get_rank() == 0:
+                datasets_results = eval(args, trainer, val_dataloaders)
                 msg = f"Rank {dist.get_rank()}: Epoch {epoch}, validation metrics \n"
                 for key, res in datasets_results.items():
                     msg += f"Dataset {key}: {res}\n"
@@ -177,14 +178,14 @@ def train(
         dist.barrier()
 
 
-def eval(trainer, val_dataloaders):
+def eval(args, trainer, val_dataloaders):
     datasets_results = dict()
     for name, dataloader in val_dataloaders.items():
         trainer.on_val_epoch_start()
         for batch_idx, batch in enumerate(dataloader):
             trainer.val_step(batch, batch_idx)
-        epoch_metric_dict = trainer.on_val_epoch_end()
-        datasets_results[name] = epoch_metric_dict
+        metric_dict = trainer.on_val_epoch_end(name, dataloader.dataset, args.logdir)
+        datasets_results[name] = metric_dict
     return datasets_results
 
 

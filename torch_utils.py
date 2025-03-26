@@ -106,3 +106,16 @@ class RunningStatistic():
             dist.all_reduce(self.count, op=dist.ReduceOp.SUM)
         mean = self.sum / self.count
         return mean
+
+
+def pad_and_stack(tensor_list, pad_value):
+    # Find the maximum dimensions
+    max_dims = [max(t.shape[i] for t in tensor_list) for i in range(tensor_list[0].dim())]
+    batched = torch.full(
+        [len(tensor_list), *max_dims], pad_value,
+        dtype=tensor_list[0].dtype, device=tensor_list[0].device
+    )
+    for i, tensor in enumerate(tensor_list):
+        slices = tuple(slice(0, s) for s in tensor.shape)
+        batched[i][slices] = tensor
+    return batched

@@ -230,23 +230,44 @@ class RandomHorizontalFlip():
     
     def __call__(self, sample):
         if self.do_flip:
-            image = sample["image"] if "image" in sample else None
-            bboxes = sample["bboxes"] if "bboxes" in sample else None
-            polygons = sample["polygons"] if "polygons" in sample else None
-            mask = sample["mask"] if "mask" in sample else None
-
-            if image is not None:
-                image = TF.horizontal_flip(image)
-            if bboxes is not None:
+            if "image" in sample:
+                sample["image"] = TF.horizontal_flip(sample["image"])
+            if "bboxes" in sample:
+                bboxes = sample["bboxes"]
                 bboxes[:, 0], bboxes[:, 2] = self.width - bboxes[:, 2], self.width - bboxes[:, 0]
-            if polygons is not None:
-                for poly in polygons:
+                sample["bboxes"] = bboxes
+            if "polygons" in sample:
+                for poly in sample["polygons"]:
                     poly[:, 0] = self.width - poly[:, 0]
-            if mask is not None:
-                mask = TF.horizontal_flip(mask)
-            
-            return {"image": image, "bboxes": bboxes, "polygons": polygons, "mask": mask}
-        
+            if "mask" in sample:
+                sample["mask"] = TF.horizontal_flip(sample["mask"])
+        return sample
+
+
+class ResizeLongestSide():
+    def __init__(self, size: int):
+        self.size = size
+    
+    def reset(self, image):
+        h, w = image.shape[-2:]
+        if h > w:
+            self.scale = self.size / h
+            self.scaled_h = int(self.size)
+            self.scaled_w = int(round(self.size / h * w))
         else:
-            return sample
+            self.scale = self.size / w
+            self.scaled_w = int(self.size)
+            self.scaled_h = int(round(self.size / w * h))
+    
+    def __call__(self, sample):
+        if "image" in sample:
+            sample["image"] = F.interpolate(sample["image"].unsqueeze(0), (self.scaled_h, self.scaled_w), mode="bilinear").squeeze(0)
+        if "bboxes" in sample:
+            sample["bboxes"] *= self.scale
+        if "polygons" in sample:
+            for poly in sample["polygons"]:
+                poly *= self.scale
+        if "mask" in sample:
+            sample["mask"] = F.interpolate(sample["mask"].unsqueeze(0), (self.scaled_h, self.scaled_w), mode="nearest").squeeze(0)
         
+        return sample

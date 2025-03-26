@@ -1,5 +1,6 @@
 import copy
 import itertools
+import json
 import logging
 import os
 from PIL import Image
@@ -19,6 +20,7 @@ from modules.position_embedding import SinusoidalEmbedding2D
 from classifiers.model.swin_transformer import PatchEmbed, PatchMerging, SwinTransformerBlock
 from detectors.model.deformable_detr import DeformableTransformerEncoderLayer, DeformableTransformerEncoder
 from segmentors.loss.matching_based import SetClassSegmentLoss
+from segmentors.data.coco import COCO_CATEGORIES, model_output_to_coco_format, coco_eval_instance_seg
 import torch_utils
 import utils
 
@@ -969,7 +971,7 @@ class MaskFormerHead(nn.Module):
         return predictions
 
 
-def sem_seg_postprocess(result, img_size, output_height, output_width):
+def sem_seg_postprocess(result, img_size, origin_size):
     """
     Return semantic segmentation predictions in the original resolution.
 
@@ -988,10 +990,10 @@ def sem_seg_postprocess(result, img_size, output_height, output_width):
         semantic segmentation prediction (Tensor): A tensor of the shape
             (C, output_height, output_width) that contains per-pixel soft predictions.
     """
-    result = result[:, : img_size[0], : img_size[1]].expand(1, -1, -1, -1)
+    result = result[:, : img_size[0], : img_size[1]]
     result = F.interpolate(
-        result, size=(output_height, output_width), mode="bilinear", align_corners=False
-    )[0]
+        result.unsqueeze(0), size=origin_size, mode="bilinear", align_corners=False
+    ).squeeze(0)
     return result
 
 
@@ -1076,46 +1078,47 @@ class MaskFormer(nn.Module):
         outputs = self.sem_seg_head(features)
         return outputs
     
-    def inference(self, batch, contiguous_id_to_dataset_id, dataset_thing_ids):
-        images = batch['image']
-        outputs = self(batch)
+    def inference(
+        self, images, image_sizes, origin_sizes,
+        contiguous_id_to_dataset_id, dataset_thing_ids
+    ):
+        outputs = self(images)
 
         mask_cls_results = outputs["pred_logits"]
         mask_pred_results = outputs["pred_masks"]
         mask_pred_results = F.interpolate(
             mask_pred_results,
-            size=(images.shape[-2], images.shape[-1]),
+            scale_factor=4,
             mode="bilinear",
             align_corners=False
         )
         del outputs
 
         processed_results = list()
-        image_sizes = [(im.shape[-2], im.shape[-1]) for im in images]
-        for mask_cls_result, mask_pred_result, height, width, image_size in zip(
-            mask_cls_results, mask_pred_results, batch["height"], batch["width"], image_sizes
+        for mask_cls_result, mask_pred_result, origin_size, image_size in zip(
+            mask_cls_results, mask_pred_results, origin_sizes, image_sizes
         ):
             # mask_cls_result: shape (query, class)
             # mask_pred_result: shape (query, h, w)
             processed_results.append({})
 
             if self.sem_seg_postprocess_before_inference:
-                mask_pred_result = sem_seg_postprocess(mask_pred_result, image_size, height, width)
+                mask_pred_result = sem_seg_postprocess(mask_pred_result, image_size, origin_size)
                 mask_cls_result = mask_cls_result.to(mask_pred_result)
             
             if self.semantic_on:
                 r = self.semantic_inference(mask_cls_result, mask_pred_result)
                 if not self.sem_seg_postprocess_before_inference:
-                    r = sem_seg_postprocess(r, image_size, height, width)
-                processed_results[-1]["sem_seg"] = r    # shape (class, h, w)
+                    r = sem_seg_postprocess(r, image_size, origin_size)
+                processed_results[-1]["semantic"] = r    # shape (class, h, w)
             
             if self.panoptic_on:
                 panoptic_r = self.panoptic_inference(mask_cls_result, mask_pred_result, contiguous_id_to_dataset_id, dataset_thing_ids)
-                processed_results[-1]["panoptic_seg"] = panoptic_r
+                processed_results[-1]["panoptic"] = panoptic_r
             
             if self.instance_on:
                 instance_r = self.instance_inference(mask_cls_result, mask_pred_result, dataset_thing_ids)
-                processed_results[-1]["instances"] = instance_r
+                processed_results[-1]["instance"] = instance_r
         
         return processed_results
 
@@ -1310,21 +1313,51 @@ class Trainer():
     
     def on_val_epoch_start(self):
         self.model.eval()
-        self.metric_pq.reset()
+        # self.metric_pq.reset()
+
+        dataset_id_to_contiguous_id = dict()
+        self.dataset_thing_ids = set()
+        for i, cat in enumerate(COCO_CATEGORIES):
+            dataset_id_to_contiguous_id[cat["id"]] = i
+            if cat["isthing"]:
+                self.dataset_thing_ids.add(cat["id"])
+        self.contiguous_id_to_dataset_id = {v: k for k, v in dataset_id_to_contiguous_id.items()}
+
+        self.predictions = list()
     
     def val_step(self, batch, batch_idx):
-        processed_results = self.model.inference(batch)
-        for res in processed_results:
-            panoptic_id_mask, panoptic_sem_mask, segments_info = res["panoptic_seg"]
-            panoptic_mask = torch.stack((panoptic_sem_mask, panoptic_id_mask), dim=-1)
-            self.metric_pq.update(panoptic_mask.unsqueeze(0), batch["panoptic_mask"])
+        image_list = [x["image"].cuda() for x in batch]
+        image_sizes = [(im.shape[-2], im.shape[-1]) for im in image_list]
+        origin_sizes = [(x["height"], x["width"]) for x in batch]
+        images = torch_utils.pad_and_stack(image_list, pad_value=128)
+        results = self.model.module.inference(
+            images, image_sizes, origin_sizes,
+            self.contiguous_id_to_dataset_id, self.dataset_thing_ids
+        )
+        for inp, res in zip(batch, results):
+            instance_res = model_output_to_coco_format(
+                inp["image_id"], res["instance"]["pred_classes"], res["instance"]["scores"],
+                res["instance"]["pred_boxes"], res["instance"]["pred_masks"]
+            )
+            self.predictions.append({
+                "image_id": inp["image_id"],
+                "instance": instance_res
+            })
     
-    def on_val_epoch_end(self):
+    def on_val_epoch_end(self, dataset_name, dataset, logdir):
+        preds_coco_style = list(itertools.chain(*[x["instance"] for x in self.predictions]))
+        with open(os.path.join(logdir, f"{dataset_name}_instance_seg_results.json"), "w") as f:
+            json.dump(preds_coco_style, f)
+        
+        results, results_per_category = coco_eval_instance_seg(dataset.coco_anno_file, preds_coco_style)
+
         logdict = dict()
-        quality = self.metric_pq.compute()
-        logdict[f"val/pq"] = quality[0].item()
-        logdict[f"val/sq"] = quality[1].item()
-        logdict[f"val/rq"] = quality[2].item()
+        for key, val in results.items():
+            logdict[f"val/{key}"] = val
+        # quality = self.metric_pq.compute()
+        # logdict[f"val/pq"] = quality[0].item()
+        # logdict[f"val/sq"] = quality[1].item()
+        # logdict[f"val/rq"] = quality[2].item()
         return logdict
     
     def log_step(self, batch, output, logdir, global_step, epoch, batch_idx):
@@ -1338,7 +1371,6 @@ class Trainer():
         return logdict
 
     def log_image(self, batch, output, logdir, global_step, epoch, batch_idx):
-        from segmentors.data.coco import COCO_CATEGORIES
         dirname = os.path.join(logdir, "log_images")
         os.makedirs(dirname, exist_ok=True)
 

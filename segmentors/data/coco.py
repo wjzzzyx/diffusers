@@ -4,14 +4,16 @@ import logging
 import os
 from PIL import Image
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
 import pycocotools
 import pycocotools.coco
+import pycocotools.cocoeval
 
-from segmentors.transform import Compose, RandomHorizontalFlip, LargeScaleJitter
+from segmentors.transform import Compose, RandomHorizontalFlip, LargeScaleJitter, ResizeLongestSide
 
 
 logger = logging.getLogger(__name__)
@@ -348,17 +350,18 @@ def filter_empty_instances(classes: torch.Tensor, bboxes: torch.Tensor, masks: t
 
 
 class COCOInstanceDataset(Dataset):
-    def __init__(self, data_dir, json_file, mode, target_size=1024):
-        self.cat_ids, self.data = load_coco_json(json_file, data_dir)
+    def __init__(self, data_dir, anno_file, mode, target_size=1024):
+        self.coco_anno_file = anno_file
+        self.cat_ids, self.data = load_coco_json(anno_file, data_dir)
         self.mode = mode
         if self.mode == "train":
             self.target_size = target_size
-            self.transform = T.Compose([
+            self.transform = Compose([
                 RandomHorizontalFlip(),
                 LargeScaleJitter(target_size),
             ])
         else:
-            self.transform = None
+            self.transform = ResizeLongestSide(target_size)
         self.dataset_id_to_contiguous_id = {c: i for i, c in enumerate(self.cat_ids)}
     
     def __len__(self):
@@ -372,6 +375,8 @@ class COCOInstanceDataset(Dataset):
         image = TF.pil_to_tensor(image)
         
         if self.mode != "train":
+            self.transform.reset(image)
+            image = self.transform({"image": image})["image"]
             return {
                 "image_id": info["image_id"],
                 "image_fname": info["file_name"],
@@ -426,3 +431,77 @@ class COCOInstanceDataset(Dataset):
 
 def collate_fn(batch):
     return batch
+
+
+def model_output_to_coco_format(image_id, classes, scores, bboxes, masks):
+    contiguous_id_to_dataset_id = dict()
+    for i, cat in enumerate(COCO_CATEGORIES):
+        contiguous_id_to_dataset_id[i] = cat["id"]
+    
+    # convert model class id to dataset class id
+    classes = classes.tolist()
+    classes = [contiguous_id_to_dataset_id[c] for c in classes]
+    scores = scores.tolist()
+    # convert from xyxy bbox to xywh bbox
+    bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 0]
+    bboxes[:, 3] = bboxes[:, 3] - bboxes[:, 1]
+    bboxes = bboxes.tolist()
+    masks = masks.cpu().numpy()
+    rles = list()    # ?
+    for m in masks:
+        m = np.array(m[:, :, None], order="F", dtype="uint8")
+        rle = pycocotools.mask.encode(m)[0]
+        # "counts" is an array encoded by pycocotools as a byte-stream. Python3's
+        # json writer witch always produces strings cannot serialize a bytestream
+        # unless you decode it. Thankfully, utf-8 works out (which is also what 
+        # the pycocotools/_mask.pyx does).
+        rle["counts"] = rle["counts"].decode("utf-8")
+        rles.append(rle)
+    
+    results = list()
+    for i in range(len(classes)):
+        results.append({
+            "image_id": image_id,
+            "category_id": classes[i],
+            "bbox": bboxes[i],
+            "score": scores[i],
+            "segmentation": rles[i]
+        })
+    return results
+
+
+def coco_eval_instance_seg(anno_file, predictions):
+    with contextlib.redirect_stdout(io.StingIO()):
+        coco_api = pycocotools.coco.COCO(anno_file)
+    
+    assert(len(predictions) > 0)
+
+    for p in predictions:
+        p.pop("bbox", None)
+    
+    pred_api = coco_api.loadRes(predictions)
+    evaluator = pycocotools.cocoeval.COCOeval(coco_api, pred_api, "segm")
+    evaluator.evaluate()
+    evaluator.accumulate()
+    evaluator.summarize()
+
+    metrics = ["AP", "AP50", "AP75", "APs", "APm", "APl"]
+    results = {
+        metric: float(evaluator.stats[i] * 100 if evaluator.stats[i] >= 0 else "nan")
+        for i, metric in enumerate(metrics)
+    }
+
+    # precisions: shape (iou, recall, cls, area range, max dets)
+    precisions = evaluator.eval["precision"]
+    results_per_category = dict()
+    class_names = [x["name"] for x in COCO_CATEGORIES if x["isthing"] == 1]
+    assert(len(class_names) == precisions.shape[2])
+    for iclass, name in enumerate(class_names):
+        # area range index 0: all area ranges
+        # max dets index -1: typically 100 per image
+        precision = precisions[:, :, iclass, 0, -1]
+        precision = precision[precision > -1]
+        ap = np.mean(precision) if precision.size else float("nan")
+        results_per_category[f"AP-{name}"] = float(ap * 100)
+    
+    return results, results_per_category
