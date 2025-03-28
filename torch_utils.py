@@ -88,9 +88,9 @@ class RunningStatistic():
         self.reset()
     
     def reset(self):
-        self.sum = torch.tensor(0, dtype=torch.float, device=self.device)
-        self.count = torch.tensor(0, device=self.device)
-        self.val = torch.tensor(0, dtype=torch.float, device=self.device)
+        self.sum = torch.tensor(0, dtype=torch.float, device=self.device, requires_grad=False)
+        self.count = torch.tensor(0, device=self.device, requires_grad=False)
+        self.val = torch.tensor(0, dtype=torch.float, device=self.device, requires_grad=False)
     
     def update(self, val, n):
         # val is the mean over n counts

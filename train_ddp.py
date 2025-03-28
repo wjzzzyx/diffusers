@@ -158,7 +158,7 @@ def train(
         
         if epoch % train_config.eval_interval == 0:
             if dist.get_rank() == 0:
-                datasets_results = eval(args, trainer, val_dataloaders)
+                datasets_results = eval(args, trainer, val_dataloaders, global_step, epoch)
                 msg = f"Rank {dist.get_rank()}: Epoch {epoch}, validation metrics \n"
                 for key, res in datasets_results.items():
                     msg += f"Dataset {key}: {res}\n"
@@ -178,12 +178,12 @@ def train(
         dist.barrier()
 
 
-def eval(args, trainer, val_dataloaders):
+def eval(args, trainer, val_dataloaders, global_step: int, epoch: int):
     datasets_results = dict()
     for name, dataloader in val_dataloaders.items():
         trainer.on_val_epoch_start()
         for batch_idx, batch in enumerate(dataloader):
-            trainer.val_step(batch, batch_idx)
+            trainer.val_step(batch, global_step, epoch, batch_idx, args.logdir)
         metric_dict = trainer.on_val_epoch_end(name, dataloader.dataset, args.logdir)
         datasets_results[name] = metric_dict
     return datasets_results
