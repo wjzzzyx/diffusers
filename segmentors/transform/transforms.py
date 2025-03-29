@@ -20,10 +20,13 @@ class LargeScaleJitter():
     Implementation of large scale jitter from copy_paste
     https://github.com/gaopengcuhk/Pretrained-Pix2Seq/blob/7d908d499212bfabd33aeaa838778a6bfb7b84cc/datasets/transforms.py 
     """
-    def __init__(self, output_size: Union[list, int] = 1024, aug_scale_min=0.1, aug_scale_max=2.0):
+    def __init__(
+        self, output_size: Union[list, int] = 1024, aug_scale_min=0.1, aug_scale_max=2.0, mask_pad_value=0
+    ):
         self.target_size = torch.tensor([output_size, output_size]) if isinstance(output_size, int) else torch.tensor(output_size)
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
+        self.mask_pad_value = mask_pad_value
     
     def reset(self, image):
         # scale parameters
@@ -45,47 +48,45 @@ class LargeScaleJitter():
     def __call__(self, sample):
         # bboxes: tensor([[x, y, x, y]])
         # polygons: [tensor([x, y, ...]), ...]
-        image = sample["image"] if "image" in sample else None
-        bboxes = sample["bboxes"] if "bboxes" in sample else None
-        polygons = sample["polygons"] if "polygons" in sample else None
-        mask = sample["mask"] if "mask" in sample else None
 
         # resize image and annos
-        if image is not None:
-            image = F.interpolate(image.unsqueeze(0), self.scaled_size.tolist(), mode='bilinear').squeeze(0)
-        if bboxes is not None:
-            bboxes *= self.scale
-        if polygons is not None:
-            for ipoly in range(len(polygons)):
-                polygons[ipoly] *= self.scale
-        if mask is not None:
-            mask = F.interpolate(mask.unsqueeze(0), self.scaled_size.tolist(), mode='nearest').squeeze(0)
+        if "image" in sample:
+            sample["image"] = F.interpolate(sample["image"].unsqueeze(0), self.scaled_size.tolist(), mode='bilinear').squeeze(0)
+        if "bboxes" in sample:
+            sample["bboxes"] *= self.scale
+        if "polygons" in sample:
+            for ipoly in range(len(sample["polygons"])):
+                sample["polygons"][ipoly] *= self.scale
+        if "mask" in sample:
+            sample["mask"] = F.interpolate(sample["mask"].unsqueeze(0), self.scaled_size.tolist(), mode='nearest').squeeze(0)
 
         # random crop
-        if image is not None:
-            image = image[:, self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
-        if bboxes is not None:
+        if "image" in sample:
+            sample["image"] = sample["image"][:, self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
+        if "bboxes" in sample:
+            bboxes = sample["bboxes"]
             bboxes[:, 0] = (bboxes[:, 0] - self.crop_x1).clamp(min=0, max=self.target_size[1])
             bboxes[:, 1] = (bboxes[:, 1] - self.crop_y1).clamp(min=0, max=self.target_size[0])
             bboxes[:, 2] = (bboxes[:, 2] - self.crop_x1).clamp(min=0, max=self.target_size[1])
             bboxes[:, 3] = (bboxes[:, 3] - self.crop_y1).clamp(min=0, max=self.target_size[0])
-        if polygons is not None:
-            for poly in polygons:
+            sample["bboxes"] = bboxes
+        if "polygons" in sample:
+            for poly in sample["polygons"]:
                 poly[:, 0] = (poly[:, 0] - self.crop_x1).clamp(min=0, max=self.target_size[1])
                 poly[:, 1] = (poly[:, 1] - self.crop_y1).clamp(min=0, max=self.target_size[0])
-        if mask is not None:
-            mask = mask[:, self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
+        if "mask" in sample:
+            sample["mask"] = sample["mask"][:, self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
 
         # pad
         padding_h = max(self.target_size[0] - self.crop_size[0], 0).item()
         padding_w = max(self.target_size[1] - self.crop_size[1], 0).item()
-        if image is not None:
-            image = F.pad(image, [0, padding_w, 0, padding_h], value=128)
-        if mask is not None:
+        if "image" in sample:
+            sample["image"] = F.pad(sample["image"], [0, padding_w, 0, padding_h], value=128)
+        if "mask" in sample:
             # TODO mask padding value?
-            mask = F.pad(mask, [0, padding_w, 0, padding_h], value=0)
+            sample["mask"] = F.pad(sample["mask"], [0, padding_w, 0, padding_h], value=self.mask_pad_value)
 
-        return {"image": image, "bboxes": bboxes, "polygons": polygons, "mask": mask}
+        return sample
 
 
 class RandomCrop_FGAware():

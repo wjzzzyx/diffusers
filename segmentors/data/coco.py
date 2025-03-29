@@ -350,7 +350,7 @@ def filter_empty_instances(classes: torch.Tensor, bboxes: torch.Tensor, masks: t
 
 
 class COCOInstanceDataset(Dataset):
-    def __init__(self, data_dir, anno_file, mode, target_size=1024):
+    def __init__(self, data_dir, anno_file, mode, target_size=1024, mask_pad_value=80):
         self.coco_anno_file = anno_file
         self.cat_ids, self.data = load_coco_json(anno_file, data_dir)
         self.mode = mode
@@ -358,7 +358,7 @@ class COCOInstanceDataset(Dataset):
             self.target_size = target_size
             self.transform = Compose([
                 RandomHorizontalFlip(),
-                LargeScaleJitter(target_size),
+                LargeScaleJitter(target_size, mask_pad_value=mask_pad_value),
             ])
         else:
             self.transform = ResizeLongestSide(target_size)

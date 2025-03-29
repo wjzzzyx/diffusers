@@ -1129,6 +1129,8 @@ class MaskFormer(nn.Module):
         return semseg
 
     def panoptic_inference(self, mask_cls, mask_pred, contiguous_id_to_dataset_id, dataset_thing_ids):
+        # mask_cls: shape (query, class)
+        # mask_pred: shape (query, h, w)
         scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
         mask_pred = mask_pred.sigmoid()
 
@@ -1136,8 +1138,6 @@ class MaskFormer(nn.Module):
         cur_scores = scores[keep]
         cur_classes = labels[keep]
         cur_masks = mask_pred[keep]
-        cur_mask_cls = mask_cls[keep]
-        cur_mask_cls = cur_mask_cls[:, :-1]
 
         cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks    # shape (query, h, w)
 
@@ -1184,6 +1184,8 @@ class MaskFormer(nn.Module):
             return panoptic_seg, segments_info
     
     def instance_inference(self, pred_logits, pred_mask, dataset_thing_ids):
+        # pred_logits: shape (query, class)
+        # pred_mask: shape (query, h, w)
         scores = F.softmax(pred_logits, dim=-1)[:, :-1]
         labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
         scores_per_image, topk_indices = scores.flatten(0, 1).topk(self.test_topk_per_image, sorted=False)
@@ -1389,9 +1391,9 @@ class Trainer():
             gt_masks = [x["masks"] for x in batch]
             pred_logits = output["pred_logits"][:, :, :-1]
             pred_scores, pred_classes = pred_logits.max(dim=-1)
-            pred_masks = output["pred_masks"]
             pred_scores, topk_index = pred_scores.topk(10, dim=1)    # shape (batch, k)
             pred_classes = torch.gather(pred_classes, 1, topk_index)
+            pred_masks = output["pred_masks"]
             batch_index = torch.arange(topk_index.size(0)).unsqueeze(1)
             pred_masks = pred_masks[batch_index, topk_index]
             pred_masks = F.interpolate(pred_masks, scale_factor=4, model="bilinear")

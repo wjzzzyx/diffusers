@@ -200,6 +200,9 @@ class SetClassSegmentLoss(nn.Module):
         num_points, oversample_ratio, importance_sample_ratio
     ):
         super().__init__()
+        self.weight_class = weight_class
+        self.weight_bce = weight_bce
+        self.weight_dice = weight_dice
         self.num_classes = num_classes
         self.num_points = num_points
         self.oversample_ratio = oversample_ratio
@@ -246,9 +249,8 @@ class SetClassSegmentLoss(nn.Module):
         return losses
 
     def loss_labels(self, pred_logits, gt_classes, indices, num_masks):
-        """Classification loss (NLL)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
-        """
+        # pred_logits: shape (batch, query, class)
+        # gt_classes: list [shape (gt_obj)]
         batch_size, num_queries = pred_logits.shape[:2]
         src_logits = pred_logits.float()
 
