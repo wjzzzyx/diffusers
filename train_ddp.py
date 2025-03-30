@@ -54,7 +54,9 @@ def main(args):
     # initialize with environment variables for maximum customizability
     world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
     rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
-    dist.init_process_group("nccl", init_method="env://", world_size=world_size, rank=rank)
+    dist.init_process_group(
+        "nccl", init_method="env://", world_size=world_size, rank=rank, timeout=datetime.timedelta(minutes=60)
+    )
     local_world_size = (int(os.environ.get("LOCAL_WORLD_SIZE", "0")) or
                         int(os.environ.get("SLURM_GPUS_ON_NODE", "0")) or
                         torch.cuda.device_count())
@@ -163,6 +165,8 @@ def train(
                 for key, res in datasets_results.items():
                     msg += f"Dataset {key}: {res}\n"
                 logging.info(msg)
+        
+        dist.barrier()
         
         if epoch % train_config.ckpt_interval == 0 and dist.get_rank() == 0:
             checkpoint = {
