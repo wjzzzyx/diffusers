@@ -1432,3 +1432,12 @@ class Trainer():
                 Image.fromarray(mask).save(
                     os.path.join(logdir, f"{imageid}_gs{global_step}-e{epoch}_pred.png")
                 )
+
+    def get_model_state_dict(self):
+        return self.model.module.state_dict()
+    
+    def get_optimizer_state_dict(self):
+        return self.optimizer.state_dict()
+    
+    def get_lr_scheduler_state_dict(self):
+        return self.lr_scheduler_state_dict()
