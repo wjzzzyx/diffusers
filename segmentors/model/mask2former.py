@@ -1312,7 +1312,6 @@ class Trainer():
     
     def on_val_epoch_start(self):
         self.model.eval()
-        # self.metric_pq.reset()
 
         dataset_id_to_contiguous_id = dict()
         self.dataset_thing_ids = set()
@@ -1324,6 +1323,7 @@ class Trainer():
 
         self.predictions = list()
     
+    @torch.no_grad()
     def val_step(self, batch, global_step, epoch, batch_idx, logdir):
         image_list = [x["image"].cuda() for x in batch]
         image_sizes = [(im.shape[-2], im.shape[-1]) for im in image_list]
@@ -1346,32 +1346,42 @@ class Trainer():
                 "instance": instance_res
             })
         
-        dirname = os.path.join(logdir, "log_images", "val")
-        os.makedir(dirname, exist_ok=True)
-        image_list = list()
-        for i in range(len(batch)):
-            image_list.append(
-                F.interpolate(batch[i]["image"].unsqueeze(0), size=origin_sizes[i], mode="bilinear").squeeze(0)
+        if batch_idx % 100 == 0:
+            dirname = os.path.join(logdir, "log_images", "val")
+            os.makedir(dirname, exist_ok=True)
+            image_list = list()
+            for i in range(len(batch)):
+                image_list.append(
+                    F.interpolate(batch[i]["image"].unsqueeze(0), size=origin_sizes[i], mode="bilinear").squeeze(0)
+                )
+            self.log_image(
+                dirname, global_step, epoch,
+                fnames=[os.path.basename(x["image_fname"]) for x in batch],
+                images=image_list,
+                pred_classes=[res["instance"]["classes"] for res in results],
+                pred_masks=[res["instance"]["masks"] for res in results]
             )
-        self.log_image(
-            dirname, global_step, epoch,
-            fnames=[os.path.basename(x["image_fname"]) for x in batch],
-            images=image_list,
-            pred_classes=[res["instance"]["classes"] for res in results],
-            pred_masks=[res["instance"]["masks"] for res in results]
-        )
     
     def on_val_epoch_end(self, dataset_name, dataset, logdir):
-        preds_coco_style = list(itertools.chain(*[x["instance"] for x in self.predictions]))
-        with open(os.path.join(logdir, f"{dataset_name}_instance_seg_results.json"), "w") as f:
-            json.dump(preds_coco_style, f)
-        
-        results, results_per_category = coco_eval_instance_seg(dataset.coco_anno_file, preds_coco_style)
+        if dist.get_rank() == 0:
+            predictions = [None for _ in dist.get_world_size()]
+            dist.gather_object(self.predictions, predictions, dst=0)
+            predictions = list(itertools.chain(*predictions))
 
-        logdict = dict()
-        for key, val in results.items():
-            logdict[f"val/{key}"] = val
-        return logdict
+            preds_coco_style = list(itertools.chain(*[x["instance"] for x in predictions]))
+            with open(os.path.join(logdir, f"{dataset_name}_instance_seg_results.json"), "w") as f:
+                json.dump(preds_coco_style, f)
+        
+            results, results_per_category = coco_eval_instance_seg(dataset.coco_anno_file, preds_coco_style)
+        
+            logdict = dict()
+            for key, val in results.items():
+                logdict[f"val/{key}"] = val
+            return logdict
+        
+        else:
+            dist.gather_object(self.predictions, None, dst=0)
+            return dict()
     
     @torch.no_grad()
     def log_step(self, batch, output, logdir, global_step, epoch, batch_idx):

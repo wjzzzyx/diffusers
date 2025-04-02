@@ -14,6 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+import torch_utils
 import utils
 
 
@@ -31,6 +32,7 @@ def setup_logging(log_file, rank):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
     if rank == 0:
         fh = logging.FileHandler(log_file)
         fh.setFormatter(formatter)
@@ -104,11 +106,17 @@ def main(args):
         collate_fn=utils.get_obj_from_str(config.data.train.collate_fn)
     )
     val_datasets = {cfg.name: utils.instantiate_from_config(cfg) for cfg in config.data.val}
+    val_samplers = {
+        name: torch_utils.InferenceSampler(len(val_dataset))
+        for name, val_dataset in val_datasets.items()
+    }
     val_dataloaders = {
         name: torch.utils.data.DataLoader(
             val_dataset,
-            batch_size=config.data.val_batch_size,
-            shuffle=False,
+            batch_size=config.data.val_batch_size // world_size,
+            sampler=val_samplers[name],
+            drop_last=False,
+            pin_memory=True,
             num_workers=config.data.num_workers,
             collate_fn=utils.get_obj_from_str(config.data.val[0].collate_fn)
         ) for name, val_dataset in val_datasets.items()
@@ -159,12 +167,11 @@ def train(
         #     logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
         
         if epoch % train_config.eval_interval == 0:
-            if dist.get_rank() == 0:
-                datasets_results = eval(args, trainer, val_dataloaders, global_step, epoch)
-                msg = f"Rank {dist.get_rank()}: Epoch {epoch}, validation metrics \n"
-                for key, res in datasets_results.items():
-                    msg += f"Dataset {key}: {res}\n"
-                logging.info(msg)
+            datasets_results = eval(args, trainer, val_dataloaders, global_step, epoch)
+            msg = f"Rank {dist.get_rank()}: Epoch {epoch}, validation metrics \n"
+            for key, res in datasets_results.items():
+                msg += f"Dataset {key}: {res}\n"
+            logging.info(msg)
         
         dist.barrier()
         
@@ -190,6 +197,7 @@ def eval(args, trainer, val_dataloaders, global_step: int, epoch: int):
             trainer.val_step(batch, global_step, epoch, batch_idx, args.logdir)
         metric_dict = trainer.on_val_epoch_end(name, dataloader.dataset, args.logdir)
         datasets_results[name] = metric_dict
+        dist.barrier()
     return datasets_results
 
 
