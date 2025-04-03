@@ -1275,7 +1275,10 @@ class Trainer():
                 self.loss_meters[f"loss_bce_{i}"] = torch_utils.RunningStatistic(device)
                 self.loss_meters[f"loss_dice_{i}"] = torch_utils.RunningStatistic(device)
         
-        self.metric_pq = torchmetrics.detection.PanopticQuality()
+        # self.metric_pq = torchmetrics.detection.PanopticQuality()
+
+        # auto mixed-precision
+        self.scaler = torch.amp.GradScaler("cuda", enabled=True)
     
     def on_train_epoch_start(self):
         self.model.train()
@@ -1285,20 +1288,23 @@ class Trainer():
     def train_step(self, batch, batch_idx, global_step):
         batch_size = len(batch)
         images = torch.stack([x["image"] for x in batch]).cuda()
-        outputs = self.model(images)
-
         gt_classes = [x["classes"].cuda() for x in batch]
         gt_masks = [x["masks"].cuda() for x in batch]
-        loss_dict = self.loss_fn(
-            outputs["pred_logits"], outputs["pred_masks"],
-            gt_classes, gt_masks, outputs["aux_outputs"]
-        )
-        loss = sum(loss_dict.values())
 
-        loss.backward()
+        with torch.autocast("cuda", dtype=torch.float16, enabled=True):
+            outputs = self.model(images)
+            loss_dict = self.loss_fn(
+                outputs["pred_logits"], outputs["pred_masks"],
+                gt_classes, gt_masks, outputs["aux_outputs"]
+            )
+            loss = sum(loss_dict.values())
+
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
         all_params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
         nn.utils.clip_grad_norm_(all_params, max_norm=0.01)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
         self.lr_scheduler.step()
 
@@ -1451,3 +1457,6 @@ class Trainer():
     
     def get_lr_scheduler_state_dict(self):
         return self.lr_scheduler_state_dict()
+    
+    def get_scaler_state_dict(self):
+        return self.scaler.state_dict()
