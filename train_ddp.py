@@ -150,20 +150,20 @@ def train(
     val_dataloaders,
     writer
 ):
-    global_step = 0
+    global_step = 1
     start_epoch = 1
     for epoch in range(start_epoch, train_config.num_epochs + 1):
         train_dataloader.sampler.set_epoch(epoch)
         trainer.on_train_epoch_start()
         for batch_idx, batch in tqdm(enumerate(train_dataloader), desc=f"Epoch {epoch}", total=len(train_dataloader)):
             output = trainer.train_step(batch, batch_idx, global_step)
-            global_step += 1
             if global_step % train_config.log_interval == 0:
                 logdict = trainer.log_step(batch, output, args.logdir, global_step, epoch, batch_idx)
                 if dist.get_rank() == 0:
                     for key, val in logdict.items():
                         writer.add_scalar(f"{key}/train", val, global_step)
                 dist.barrier()
+            global_step += 1
         logdict = trainer.on_train_epoch_end(epoch)
         # if dist.get_rank() == 0:
         #     logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
@@ -174,6 +174,10 @@ def train(
             for key, res in datasets_results.items():
                 msg += f"Dataset {key}: {res}\n"
             logging.info(msg)
+            if dist.get_rank() == 0:
+                for dataset_name, dataset_res in datasets_results.items():
+                    for key, val in dataset_res.items():
+                        writer.add_scalar(f"val/{dataset_name}/{key}", val, global_step)
         
         dist.barrier()
         
