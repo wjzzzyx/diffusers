@@ -17,6 +17,8 @@ from tqdm import tqdm
 import torch_utils
 import utils
 
+os.environ["TORCH_CUDNN_V8_API_ENABLED"] = "1"
+
 
 def seed_all(seed):
     random.seed(seed)
@@ -184,6 +186,7 @@ def train(
             if train_config.save_optimizer_states:
                 checkpoint["optimizer"] = trainer.get_optimizer_state_dict()
                 checkpoint["lr_scheduler"] = trainer.get_lr_scheduler_state_dict()
+                checkpoint["scaler"] = trainer.get_scaler_state_dict()
             torch.save(checkpoint, os.path.join(args.ckptdir, f"epoch{epoch}_step{global_step}.ckpt"))
         
         dist.barrier()
