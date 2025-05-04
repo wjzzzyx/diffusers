@@ -1263,6 +1263,8 @@ class Trainer():
                 self.optimizer, [warmup_scheduler, self.lr_scheduler], milestones=[optimizer_config.warmup]
             )
         
+        self.grad_accumulation = optimizer_config.grad_accumulation
+        
         # prepare metrics
         self.loss_meters = {
             "loss_class": torch_utils.RunningStatistic(device),
@@ -1298,15 +1300,17 @@ class Trainer():
                 gt_classes, gt_masks, outputs["aux_outputs"]
             )
             loss = sum(loss_dict.values())
+            loss = loss.div(self.grad_accumulation)
 
         self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        all_params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
-        nn.utils.clip_grad_norm_(all_params, max_norm=0.01)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad(set_to_none=True)
-        self.lr_scheduler.step()
+        if global_step % self.grad_accumulation == 0:
+            self.scaler.unscale_(self.optimizer)
+            all_params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
+            nn.utils.clip_grad_norm_(all_params, max_norm=0.01)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad(set_to_none=True)
+            self.lr_scheduler.step()
 
         for key, value in loss_dict.items():
             self.loss_meters[key].update(value.detach(), batch_size)
@@ -1380,9 +1384,7 @@ class Trainer():
         
             results, results_per_category = coco_eval_instance_seg(dataset.coco_anno_file, preds_coco_style)
         
-            logdict = dict()
-            for key, val in results.items():
-                logdict[f"val/{key}"] = val
+            logdict = results
             return logdict
         
         else:
