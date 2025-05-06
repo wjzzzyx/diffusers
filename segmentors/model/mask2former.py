@@ -1391,6 +1391,28 @@ class Trainer():
             dist.gather_object(self.predictions, None, dst=0)
             return dict()
     
+    def test_step(self, batch):
+        image_list = [x["image"].cuda() for x in batch]
+        image_sizes = [(im.shape[-2], im.shape[-1]) for im in image_list]
+        origin_sizes = [(x["height"], x["width"]) for x in batch]
+        images = torch_utils.pad_and_stack(image_list, pad_value=128)
+        results = self.model.module.inference(
+            images, image_sizes, origin_sizes,
+            self.contiguous_id_to_dataset_id, self.dataset_thing_ids
+        )
+        for inp, res in zip(batch, results):
+            instance_res = model_output_to_coco_format(
+                inp["image_id"],
+                res["instance"]["classes"],
+                res["instance"]["scores"],
+                res["instance"]["boxes"],
+                res["instance"]["masks"]
+            )
+            self.predictions.append({
+                "image_id": inp["image_id"],
+                "instance": instance_res
+            })
+
     @torch.no_grad()
     def log_step(self, batch, output, logdir, global_step, epoch, batch_idx):
         logdict = dict()
@@ -1462,3 +1484,6 @@ class Trainer():
     
     def get_scaler_state_dict(self):
         return self.scaler.state_dict()
+    
+    def load_model_state_dict(self, state_dict):
+        self.model.module.load_state_dict(state_dict)

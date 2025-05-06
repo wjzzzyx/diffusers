@@ -88,7 +88,7 @@ data:
       target_size: 1024
     collate_fn: segmentors.data.coco.collate_fn
   val:
-    - name: 
+    - name: val2017
       target: segmentors.data.coco.COCOInstanceDataset
       params:
         data_dir: /mnt/sdb/data_coco/val2017
@@ -96,6 +96,14 @@ data:
         mode: val
         target_size: 640
       collate_fn: segmentors.data.coco.collate_fn
+  test:
+    - name: val2017
+      target: segmentors.data.coco.COCOInstanceDataset
+      params:
+        data_dir: /mnt/sdb/data_coco/val2017
+        anno_file: /mnt/sdb/data_coco/annotations/instances_val2017.json
+        mode: val
+        target_size: 640
 
 train_config:
   num_epochs: 100

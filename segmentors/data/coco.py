@@ -427,6 +427,10 @@ class COCOInstanceDataset(Dataset):
             "masks": masks,
             "padding_mask": padding_mask
         }
+    
+    @staticmethod
+    def collate_fn(batch):
+        return batch
 
 
 def collate_fn(batch):

@@ -1,3 +1,5 @@
+import argparse
+import datetime
 import logging
 import os
 
@@ -50,7 +52,7 @@ def main(args):
     torch.cuda.set_device(local_rank)
 
     config = OmegaConf.load(args.config)
-    args.logdir = os.path.join(args.logdir, config.exp_name)
+    args.logdir = '/'.join(args.checkpoint.split('/')[:-2])
     logger = setup_logging(os.path.join(args.logdir, "test_log.txt"), rank)
 
     test_datasets = {cfg.name: utils.instantiate_from_config(cfg) for cfg in config.data.test}
@@ -76,20 +78,21 @@ def main(args):
         config.trainer.optimizer_config,
         device=local_rank
     )
-    trainer.load_checkpoint(args.checkpoint, load_model=True)
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    trainer.load_model_state_dict(checkpoint["model"])
 
     datasets_results = eval(args, trainer, test_dataloaders)
     msg = f"Checkpoint {args.checkpoint}, test metrics \n"
     for key, res in datasets_results.items():
         msg += f"Dataset {key}: {res}\n"
-    logger.info(msg)
+    logger.info(msg, extra={"rank": 0})
 
     dist.destroy_process_group()
 
 
-def eval(args, trainer, val_dataloaders, global_step: int, epoch: int):
+def eval(args, trainer, test_dataloaders):
     datasets_results = dict()
-    for name, dataloader in val_dataloaders.items():
+    for name, dataloader in test_dataloaders.items():
         trainer.on_val_epoch_start()
         for batch_idx, batch in enumerate(dataloader):
             trainer.test_step(batch)
@@ -97,3 +100,12 @@ def eval(args, trainer, val_dataloaders, global_step: int, epoch: int):
         datasets_results[name] = metric_dict
         dist.barrier()
     return datasets_results
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True, metavar='config.yaml', help='Path to experiment config.')
+    parser.add_argument('--checkpoint', type=str, const=True, help='Checkpoint path.')
+    args, unknown = parser.parse_known_args()
+
+    main(args)
