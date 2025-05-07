@@ -1,4 +1,4 @@
-exp_name: debug
+exp_name: mask2former_coco_1024
 
 trainer:
   seed: 42
@@ -72,13 +72,14 @@ trainer:
     weight_decay_embed: 0.0
     lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
     lr_scheduler_params:
-      T_max: 100000
+      T_max: 100000    # will be modified in the code
+    grad_accumulation: 1
     warmup: 10
 
 data:
   batch_size: 16
-  val_batch_size: 8
-  num_workers: 0
+  val_batch_size: 16
+  num_workers: 2
   train:
     target: segmentors.data.coco.COCOInstanceDataset
     params:
@@ -108,6 +109,6 @@ data:
 train_config:
   num_epochs: 100
   eval_interval: 1
-  ckpt_interval: 1
+  ckpt_interval: 10
   log_interval: 1000
   save_optimizer_states: True
