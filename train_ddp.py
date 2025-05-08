@@ -9,6 +9,7 @@ import numpy as np
 from omegaconf import OmegaConf
 import torch
 import torch.distributed as dist
+# import torch.profiler as profiler
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
@@ -152,10 +153,21 @@ def train(
 ):
     global_step = 1
     start_epoch = 1
+    ### To use profiler, open chrome://tracing and load the trace.json file, or view in tensorboard
+    # prof = profiler.profile(
+    #     activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
+    #     schedule=profiler.schedule(skip_first=10, wait=1, warmup=1, active=1, repeat=1),
+    #     on_trace_ready=profiler.tensorboard_trace_hander(args.logdir),
+    #     record_shapes=False,
+    #     profile_memory=False,
+    #     with_stack=False
+    # )
     for epoch in range(start_epoch, train_config.num_epochs + 1):
         train_dataloader.sampler.set_epoch(epoch)
         trainer.on_train_epoch_start()
+        # prof.start()
         for batch_idx, batch in tqdm(enumerate(train_dataloader), desc=f"Epoch {epoch}", total=len(train_dataloader)):
+            # prof.step()
             output = trainer.train_step(batch, batch_idx, global_step)
             if global_step % train_config.log_interval == 0:
                 logdict = trainer.log_step(batch, output, args.logdir, global_step, epoch, batch_idx)
@@ -165,8 +177,8 @@ def train(
                 dist.barrier()
             global_step += 1
         logdict = trainer.on_train_epoch_end(epoch)
-        # if dist.get_rank() == 0:
-        #     logging.info(f"Rank {dist.get_rank()}: Epoch {epoch}, training losses {logdict}")
+        # prof.stop()
+        # break
         
         if epoch % train_config.eval_interval == 0:
             datasets_results = eval(args, trainer, val_dataloaders, global_step, epoch)
@@ -194,6 +206,8 @@ def train(
             torch.save(checkpoint, os.path.join(args.ckptdir, f"epoch{epoch}_step{global_step}.ckpt"))
         
         dist.barrier()
+    
+    # prof.export_chrome_trace(os.path.join(args.logdir, "trace.json"))
 
 
 def eval(args, trainer, val_dataloaders, global_step: int, epoch: int):
