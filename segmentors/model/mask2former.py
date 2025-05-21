@@ -1217,6 +1217,7 @@ class Trainer():
     def __init__(self, model_config, loss_config, optimizer_config, device):
         _model = MaskFormer(model_config)
         _model.cuda()
+        _model = torch.compile(_model)
         self.model = DistributedDataParallel(_model, device_ids=[device])
 
         self.loss_fn = SetClassSegmentLoss(
@@ -1420,6 +1421,8 @@ class Trainer():
             val = self.loss_meters[key].compute()
             logdict[key] = val.item()
             self.loss_meters[key].reset()
+        
+        logdict["learning_rate"] = self.optimizer.param_groups[0]["lr"]
         
         if dist.get_rank() == 0:
             dirname = os.path.join(logdir, "log_images", "train")
