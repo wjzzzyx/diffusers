@@ -4,7 +4,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 import torch
 
-from diffusers.model.flux import FluxModel
+from diffusers.model.flux import FluxModel, sample_inference_timestep, forward_text_model
 
 
 seed = 42
@@ -36,12 +36,12 @@ img_ids = img_ids.to(device)
 
 model.t5_text_model.to(device)
 model.clip_text_model.to(device)
-txt, txt_ids, vec = model.forward_text_model(prompt)
+txt, txt_ids, vec = forward_text_model(model.t5_tokenizer, model.t5_text_model, model.clip_tokenizer, model.clip_text_model, prompt, max_length=128)
 model.t5_text_model.cpu()
 model.clip_text_model.cpu()
 torch.cuda.empty_cache()
 
-timesteps = model.get_schedule(num_steps, image.size(1), shift=config.shift_schedule)
+timesteps = sample_inference_timestep(num_steps, image.size(1), shift=config.shift_schedule)
 
 model.flow_model.to(device)
 image = model.sample(image, img_ids, txt, txt_ids, vec, timesteps, guidance)

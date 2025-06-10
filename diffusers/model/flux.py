@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
+import torch.utils.checkpoint
 from transformers import CLIPTokenizer, CLIPTextModel, T5Tokenizer, T5EncoderModel
 
 from .vae import Encoder, Decoder
@@ -370,7 +371,7 @@ class Flux(nn.Module):
         pe = self.pe_embedder(ids)
 
         for block in self.double_blocks:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            img, txt = torch.utils.checkpoint.checkpoint(block, img, txt, vec, pe, use_reentrant=False)
 
         img = torch.cat((txt, img), 1)
         for block in self.single_blocks:
@@ -475,70 +476,71 @@ class FluxModel(nn.Module):
             pred = self.flow_model(img, img_ids, txt, txt_ids, y=vec, timesteps=t_vec, guidance=guidance_vec)
             img = img + (t_prev - t_curr) * pred
         return img
+
+
+def forward_text_model(t5_tokenizer, t5_text_model, clip_tokenizer, clip_text_model, text: list[str], max_length = None):
+    tokens_out = t5_tokenizer(
+        text,
+        truncation=True,
+        max_length=t5_tokenizer.model_max_length if max_length is None else max_length,
+        padding='max_length',
+        return_tensors='pt'
+    )
+    input_ids = tokens_out.input_ids
+    input_ids = input_ids.to(next(t5_text_model.parameters()).device)
+    # TODO use attention mask?
+    outputs = t5_text_model(input_ids, attention_mask=None, output_hidden_states=False)
+    t5_emb = outputs['last_hidden_state']
+    txt_ids = torch.zeros(t5_emb.size(0), t5_emb.size(1), 3, device=t5_emb.device)
+
+    tokens_out = clip_tokenizer(
+        text,
+        truncation=True,
+        max_length=clip_tokenizer.model_max_length,
+        padding='max_length',
+        return_tensors='pt'
+    )
+    input_ids = tokens_out['input_ids']
+    input_ids = input_ids.to(next(clip_text_model.parameters()).device)
+    outputs = clip_text_model(input_ids, attention_mask=None, output_hidden_states=False)
+    clip_emb = outputs['pooler_output']
+
+    return t5_emb, txt_ids, clip_emb
+
+
+def sample_training_timestep(sampling_method, batch_size, device, sigmoid_scale = 1.0, sigmoid_shift = 1.0):
+    if sampling_method == "uniform":
+        time = torch.rand((batch_size,), device=device)
+    elif sampling_method == "sigmoid_normal":
+        time = torch.randn((batch_size,), device=device)
+        time = (time * sigmoid_scale).sigmoid()
+        time = (sigmoid_shift * time) / (1 + (sigmoid_shift - 1) * time)
+    else:
+        raise ValueError("Unknown sampling method.")
+    return time
+
+
+def sample_inference_timestep(
+    num_steps: int,
+    image_seq_len: int,
+    base_shift: float = 0.5,
+    max_shift: float = 1.15,
+    shift: bool = True,
+) -> list[float]:
+    # extra step for zero
+    timesteps = torch.linspace(1, 0, num_steps + 1)
+
+    # shifting the schedule to favor high timesteps for higher signal images
+    if shift:
+        x1 = 256
+        x2 = 4096
+        m = (max_shift - base_shift) / (x2 - x1)
+        b = base_shift - m * x1
+        mu = m * image_seq_len + b
+
+        timesteps = math.exp(mu) / (math.exp(mu) + (1 / timesteps - 1) ** 1.0)
     
-    @staticmethod
-    def forward_text_model(self, text: list[str]):
-        tokens_out = self.t5_tokenizer(
-            text,
-            truncation=True,
-            max_length=self.t5_tokenizer.model_max_length,
-            padding='max_length',
-            return_tensors='pt'
-        )
-        input_ids = tokens_out.input_ids
-        input_ids = input_ids.to(next(self.t5_text_model.parameters()).device)
-        outputs = self.t5_text_model(input_ids, attention_mask=None, output_hidden_states=False)
-        t5_emb = outputs['last_hidden_state']
-        txt_ids = torch.zeros(t5_emb.size(0), t5_emb.size(1), 3, device=t5_emb.device)
-
-        tokens_out = self.clip_tokenizer(
-            text,
-            truncation=True,
-            max_length=self.clip_tokenizer.model_max_length,
-            padding='max_length',
-            return_tensors='pt'
-        )
-        input_ids = tokens_out['input_ids']
-        input_ids = input_ids.to(next(self.clip_text_model.parameters()).device)
-        outputs = self.clip_text_model(input_ids, attention_mask=None, output_hidden_states=False)
-        clip_emb = outputs['pooler_output']
-
-        return t5_emb, txt_ids, clip_emb
-
-    @staticmethod
-    def sample_training_timestep(sampling_method, batch_size, device, sigmoid_scale = 1.0, sigmoid_shift = 1.0):
-        if sampling_method == "uniform":
-            time = torch.rand((batch_size,), device=device)
-        elif sampling_method == "sigmoid_normal":
-            time = torch.rand((batch_size,), device=device)
-            time = (time * sigmoid_scale).sigmoid()
-            time = (sigmoid_shift * time) / (1 + (sigmoid_shift - 1) * time)
-        else:
-            raise ValueError("Unknown sampling method.")
-        return time
-    
-    def get_schedule(
-        self,
-        num_steps: int,
-        image_seq_len: int,
-        base_shift: float = 0.5,
-        max_shift: float = 1.15,
-        shift: bool = True,
-    ) -> list[float]:
-        # extra step for zero
-        timesteps = torch.linspace(1, 0, num_steps + 1)
-
-        # shifting the schedule to favor high timesteps for higher signal images
-        if shift:
-            x1 = 256
-            x2 = 4096
-            m = (max_shift - base_shift) / (x2 - x1)
-            b = base_shift - m * x1
-            mu = m * image_seq_len + b
-
-            timesteps = math.exp(mu) / (math.exp(mu) + (1 / timesteps - 1) ** 1.0)
-        
-        return timesteps.tolist()
+    return timesteps.tolist()
 
 
 class PLBase(lightning.LightningModule):
@@ -652,7 +654,7 @@ class Trainer():
 
         # prepare metrics
         self.loss_meters = {
-            "loss_mse": torch_utils.RunningStatistic()
+            "loss_mse": torch_utils.RunningStatistic(device)
         }
 
         self.device = device
@@ -669,7 +671,7 @@ class Trainer():
             latents = self.ae.encode(images)
             t5_emb, txt_ids, clip_emb = FluxModel.forward_text_model(self, batch["text"])
         noise = torch.randn_like(latents)
-        time = FluxModel.sample_training_timestep("sigmoid", batch_size, self.device)
+        time = sample_training_timestep("sigmoid", batch_size, self.device)
         time = time.view(-1, 1, 1, 1)
         xt = (1.0 - time) * latents + time * noise
         xt = einops.rearrange(xt, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
