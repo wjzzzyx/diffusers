@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 import torch
 import torch.distributed as dist
 # import torch.profiler as profiler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -106,7 +106,7 @@ def main(args):
         pin_memory=True,
         drop_last=True,
         num_workers=0,
-        collate_fn=utils.get_obj_from_str(config.data.train.collate_fn)
+        collate_fn=train_dataset.collate_fn if hasattr(train_dataset, "collate_fn") else default_collate
     )
     val_datasets = {cfg.name: utils.instantiate_from_config(cfg) for cfg in config.data.val}
     val_samplers = {
@@ -121,7 +121,7 @@ def main(args):
             drop_last=False,
             pin_memory=True,
             num_workers=config.data.num_workers,
-            collate_fn=utils.get_obj_from_str(config.data.val[0].collate_fn)
+            collate_fn=val_dataset.collate_fn if hasattr(val_dataset, "collate_fn") else default_collate
         ) for name, val_dataset in val_datasets.items()
     }
 
