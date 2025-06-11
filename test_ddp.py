@@ -6,6 +6,7 @@ import os
 from omegaconf import OmegaConf
 import torch
 import torch.distributed as dist
+from torch.utils.data import DataLoader, default_collate
 
 import torch_utils
 import utils
@@ -61,14 +62,14 @@ def main(args):
         for name, test_dataset in test_datasets.items()
     }
     test_dataloaders = {
-        name: torch.utils.data.DataLoader(
+        name: DataLoader(
             test_dataset,
             batch_size=config.data.val_batch_size // world_size,
             sampler=test_samplers[name],
             drop_last=False,
             pin_memory=True,
             num_workers=config.data.num_workers,
-            collate_fn=test_dataset.collate_fn,
+            collate_fn=test_dataset.collate_fn if hasattr(test_dataset, "collate_fn") else default_collate,
         ) for name, test_dataset in test_datasets.items()
     }
 
@@ -80,8 +81,10 @@ def main(args):
     )
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     trainer.load_model_state_dict(checkpoint["model"])
+    global_step = checkpoint["global_step"]
+    epoch = checkpoint["epoch"]
 
-    datasets_results = eval(args, trainer, test_dataloaders)
+    datasets_results = eval(args, trainer, test_dataloaders, global_step, epoch)
     msg = f"Checkpoint {args.checkpoint}, test metrics \n"
     for key, res in datasets_results.items():
         msg += f"Dataset {key}: {res}\n"
@@ -90,12 +93,12 @@ def main(args):
     dist.destroy_process_group()
 
 
-def eval(args, trainer, test_dataloaders):
+def eval(args, trainer, test_dataloaders, global_step, epoch):
     datasets_results = dict()
     for name, dataloader in test_dataloaders.items():
         trainer.on_val_epoch_start()
         for batch_idx, batch in enumerate(dataloader):
-            trainer.test_step(batch)
+            trainer.test_step(batch, global_step, epoch, batch_idx, args.logdir)
         metric_dict = trainer.on_val_epoch_end(name, dataloader.dataset, args.logdir)
         datasets_results[name] = metric_dict
         dist.barrier()
