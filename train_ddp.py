@@ -168,9 +168,9 @@ def train(
         # prof.start()
         for batch_idx, batch in tqdm(enumerate(train_dataloader), desc=f"Epoch {epoch}", total=len(train_dataloader)):
             # prof.step()
-            output = trainer.train_step(batch, batch_idx, global_step)
+            trainer.train_step(batch, global_step, epoch, batch_idx, args.logdir)
             if global_step % train_config.log_interval == 0:
-                logdict = trainer.log_step(batch, output, args.logdir, global_step, epoch, batch_idx)
+                logdict = trainer.log_step(args.logdir, global_step, epoch, batch_idx)
                 if dist.get_rank() == 0:
                     for key, val in logdict.items():
                         writer.add_scalar(f"{key}/train", val, global_step)
