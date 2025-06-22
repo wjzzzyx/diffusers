@@ -36,14 +36,14 @@ trainer:
       z_channels: 16
       scale_factor: 0.3611
       shift_factor: 0.1159
-    loss_config: null
-    optimizer_config:
-      optimizer: torch.optim.AdamW
-      base_lr: 0.0001
-      lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
-      lr_scheduler_params:
-        T_max: 100000
-    shift_schedule: False
+  loss_config: null
+  optimizer_config:
+    optimizer: torch.optim.AdamW
+    base_lr: 0.0001
+    lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+    lr_scheduler_params:
+      T_max: 100000
+  shift_schedule: False
 
 data:
   batch_size: 8
@@ -60,6 +60,12 @@ data:
       params:
         root_dir:
         mode: val
+  test:
+    - name:
+      target:
+      params:
+        root_dir:
+        mode: test
 
 train_config:
   num_epochs: 100
