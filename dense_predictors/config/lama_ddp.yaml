@@ -1,0 +1,94 @@
+exp_name: lama_reimplement
+
+trainer:
+  seed: 42
+  target: dense_predictors.model.lama.PLBase
+  model_config:
+    generator:
+      input_nc: 4
+      output_nc: 3
+      ngf: 64
+      n_downsampling: 3
+      n_blocks: 9
+      add_out_act: sigmoid
+      init_conv_kwargs:
+        ratio_gin: 0
+        ratio_gout: 0
+        enable_lfu: false
+      downsample_conv_kwargs:
+        ratio_gin: ${model.params.model_config.generator.init_conv_kwargs.ratio_gout}
+        ratio_gout: ${model.params.model_config.generator.downsample_conv_kwargs.ratio_gin}
+        enable_lfu: false
+      resnet_conv_kwargs:
+        ratio_gin: 0.75
+        ratio_gout: ${model.params.model_config.generator.resnet_conv_kwargs.ratio_gin}
+        enable_lfu: false
+    discriminator:
+      input_nc: 3
+      ndf: 64
+      n_layers: 4
+    evaluator:
+      kind: default
+      inpainted_key: inpainted
+      integral_kind: ssim_fid100_f1
+      lpips_model_path: /mnt/sdb/lama/models/lpips_models/vgg.pth
+  loss_config:
+    adversarial:
+      weight: 10
+      gp_coef: 0.001
+      mask_as_fake_target: true
+      allow_scale_mask: true
+    l1:
+      weight_missing: 0
+      weight_known: 10
+    feature_matching:
+      weight: 100
+    resnet_pl:
+      weight: 30
+      weights_path: /mnt/sdb/lama/ade20k/ade20k-resnet50dilated-ppm_deepsup/encoder_epoch_20.pth
+  optimizer_config: {}
+
+data:
+  batch_size: 10
+  val_batch_size: 8
+  num_workers: 4
+  train:
+    target: dense_predictors.data.places2.Places2Dataset
+    params:
+      root_dir: /mnt/sdb/data_places365
+      mode: train
+      target_size: 256
+      maskgen_config:
+        irregular_proba: 1
+        irregular_kwargs:
+          max_angle: 4
+          max_len: 200
+          max_width: 100
+          max_times: 5
+          min_times: 1
+        box_proba: 1
+        box_kwargs:
+          margin: 10
+          bbox_min_size: 30
+          bbox_max_size: 150
+          max_times: 4
+          min_times: 1
+        segm_proba: 0
+  val:
+    - target: dense_predictors.data.places2.Places2Dataset
+      params:
+        root_dir: /mnt/sdb/data_places365
+        mode: val
+        target_size: 256
+    - target: dense_predictors.data.places2.Places2Dataset
+      params:
+        root_dir: /mnt/sdb/data_places365
+        mode: test
+        target_size: 256
+  
+train_config:
+  num_epochs: 40
+  eval_interval: 1
+  ckpt_interval: 10
+  log_interval: 100
+  save_optimizer_states: True
