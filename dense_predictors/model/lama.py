@@ -15,8 +15,10 @@ import scipy.ndimage
 import skimage.color
 import skimage.segmentation
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 import torchvision
 from typing import List, Tuple, Dict, Optional
 import warnings
@@ -2589,3 +2591,214 @@ def generate_colors(nlabels, type='bright', first_color_black=False, last_color_
                                    boundaries=bounds, format='%1i', orientation=u'horizontal')
 
     return randRGBcolors, random_colormap
+
+
+class Trainer():
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        self.model_config = model_config
+        self.loss_config = loss_config
+        self.optimizer_config = optimizer_config
+        self.device = device
+
+        generator = FFCResNetGenerator(**model_config.generator)
+        generator = generator.cuda()
+        generator = torch.compile(generator)
+        self.generator = DistributedDataParallel(generator, device_ids=[device])
+        discriminator = NLayerDiscriminator(**model_config.discriminator)
+        discriminator = discriminator.cuda()
+        discriminator = torch.compile(discriminator)
+        self.discriminator = DistributedDataParallel(discriminator, device_ids=[device])
+
+        self.loss_adv_fn = NonSaturatingWithR1(**loss_config.adversarial)
+        self.loss_resnet_perceptual_fn = ResNetPL(**loss_config.resnet_pl).cuda()
+        
+        self.val_evaluator = make_evaluator(**model_config.evaluator)
+        self.val_evaluator.requires_grad_(False)
+
+        self.optimizer_g = torch.optim.Adam(self.generator.parameters(), lr=optimizer_config.generator_lr)
+        self.optimizer_d = torch.optim.Adam(self.discriminator.parameters(), lr=optimizer_config.discriminator_lr)
+
+    def on_train_epoch_start(self):
+        self.generator.train()
+        self.discriminator.train()
+
+    def train_step(self, batch, global_step, epoch, batch_idx, logdir):        
+        image = batch['image']
+        mask = batch['mask']
+        masked_image = image * (1 - mask)
+        image_in = torch.cat([masked_image, mask], dim=1)
+        output = self.generator(image_in)
+        inpainted = masked_image + output * mask
+
+        # optimize generator
+        loss, logdict_g = self.generator_loss(image, mask, output)
+        self.optimizer_g.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
+        self.optimizer_g.step()
+
+        # optimize discriminator
+        output = self.generator(image_in)
+        loss, logdict_d = self.discriminator_loss(image, mask, output.detach())
+        self.optimizer_d.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.discriminator.parameters(), 1.0)
+        self.optimizer_d.step()
+        
+        self.logdict = logdict_d | logdict_g
+        
+        if global_step % 1000 == 0 and dist.get_rank() == 0:
+            dirname = os.path.join(logdir, "log_images", "train")
+            os.makedirs(dirname, exist_ok=True)
+            with torch.inference_mode():
+                discr_output_real, _ = self.discriminator(image)
+                discr_output_fake, _ = self.discriminator(output)
+                image_size = image.shape[2:]
+                discr_output_real = F.interpolate(discr_output_real, size=image_size, mode="nearest")
+                discr_output_fake = F.interpolate(discr_output_fake, size=image_size, mode="nearest")
+            log_image_dict = {
+                "image": image,
+                "mask": mask,
+                "predicted_image": output,
+                "discr_output_fake": discr_output_fake,
+                "discr_output_real": discr_output_real,
+                "inpainted": inpainted,
+            }
+            self.log_image(dirname, global_step, epoch, log_image_dict)
+
+    def generator_loss(self, image, mask, output):
+        per_pixel_l1 = F.l1_loss(output, image, reduction='none')
+        pixel_weights = mask * self.loss_config.l1.weight_missing + (1 - mask) * self.loss_config.l1.weight_known
+        loss_l1 = (pixel_weights * per_pixel_l1).mean()
+
+        discr_real_pred, discr_real_features = self.discriminator(image)
+        discr_fake_pred, discr_fake_features = self.discriminator(output)
+        loss_g = F.softplus(-discr_fake_pred)
+        loss_g = loss_g.mean() * self.loss_config.adversarial.weight
+        loss = loss_l1 + loss_g
+
+        if self.loss_config.feature_matching.weight > 0:
+            loss_fm = self.feature_matching_loss(discr_fake_features, discr_real_features, mask=None)
+            loss_fm = loss_fm * self.loss_config.feature_matching.weight
+            loss = loss + loss_fm
+        
+        if self.loss_config.resnet_pl.weight > 0:
+            loss_resnet_pl = self.loss_resnet_perceptual_fn(output, image)
+            loss_resnet_pl = loss_resnet_pl * self.loss_config.resnet_pl.weight
+            loss = loss + loss_resnet_pl
+        
+        logdict = {
+            'loss_l1': loss_l1.item(),
+            'loss_g': loss_g.item(),
+            'loss_fm': loss_fm.item(),
+            'loss_resnet_pl': loss_resnet_pl.item(),
+        }
+        return loss, logdict
+
+    def feature_matching_loss(self, fake_features: List[torch.Tensor], target_features: List[torch.Tensor], mask=None):
+        if mask is None:
+            res = torch.stack([F.mse_loss(fake_feat, target_feat)
+                            for fake_feat, target_feat in zip(fake_features, target_features)]).mean()
+        else:
+            res = 0
+            norm = 0
+            for fake_feat, target_feat in zip(fake_features, target_features):
+                cur_mask = F.interpolate(mask, size=fake_feat.shape[-2:], mode='bilinear', align_corners=False)
+                error_weights = 1 - cur_mask
+                cur_val = ((fake_feat - target_feat).pow(2) * error_weights).mean()
+                res = res + cur_val
+                norm += 1
+            res = res / norm
+        return res
+    
+    def discriminator_loss(self, image, mask, output):
+        image.requires_grad = True    # ?
+        discr_real_pred, discr_real_features = self.discriminator(image)
+        discr_fake_pred, discr_fake_features = self.discriminator(output)
+        loss_d, logdict = self.loss_adv_fn.discriminator_loss(
+            real_batch=image, fake_batch=output, discr_real_pred=discr_real_pred, discr_fake_pred=discr_fake_pred, mask=mask
+        )
+        logdict['loss_d'] = loss_d.item()
+        return loss_d, logdict
+
+    def on_train_epoch_end(self):
+        return dict()
+
+    def on_val_epoch_start(self):
+        self.generator.eval()
+        self.discriminator.eval()
+        self.val_step_logs = []
+        self.val_step_states = []
+
+    @torch.no_grad()
+    def val_step(self, batch, global_step, epoch, batch_idx, logdir):
+        image = batch['image']
+        mask = batch['mask']
+        masked_image = image * (1 - mask)
+        image_in = torch.cat([masked_image, batch['mask']], dim=1)
+        output = self.generator(image_in)
+        inpainted = masked_image + output * mask
+        batch["predicted_image"] = output.detach()
+        batch["inpainted"] = inpainted.detach()
+
+        loss_g, logdict1 = self.generator_loss(image, mask, output)
+        loss_d, logdict2 = self.discriminator_loss(image, mask, output)
+        logdict = logdict1 | logdict2
+        
+        if batch_idx % 100 == 0 and dist.get_rank() == 0:
+            dirname = os.path.join(logdir, "log_images", "val")
+            os.makedirs(dirname, exist_ok=True)
+            discr_output_real, _ = self.discriminator(image)
+            discr_output_fake, _ = self.discriminator(output)
+            image_size = image.shape[2:]
+            discr_output_real = F.interpolate(discr_output_real, size=image_size, mode="nearest")
+            discr_output_fake = F.interpolate(discr_output_fake, size=image_size, mode="nearest")
+            log_image_dict = {
+                "image": image,
+                "mask": mask,
+                "predicted_image": output,
+                "discr_output_fake": discr_output_fake,
+                "discr_output_real": discr_output_real,
+                "inpainted": inpainted,
+            }
+            self.log_image(dirname, global_step, epoch, log_image_dict)
+        
+        self.val_step_logs.append(logdict)
+        self.val_step_states.append(self.val_evaluator(batch))
+        return logdict
+
+    def on_val_epoch_end(self, dataset_name, dataset, logdir):
+        pd.set_option('display.max_columns', 500)
+        pd.set_option('display.width', 1000)
+
+        val_evaluator_res = self.val_evaluator.evaluation_end(states=self.val_step_states)
+        val_evaluator_res_df = pd.DataFrame(val_evaluator_res).stack(1).unstack(0)
+        val_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
+        return flatten_dict(val_evaluator_res)
+
+    @torch.no_grad()
+    def log_image(self, logdir, global_step, epoch, batch):
+        keys = ['image', 'predicted_image', 'discr_output_fake', 'discr_output_real', 'inpainted']
+        actual_min = batch['image'].min()
+        actual_max = batch['image'].max()
+        if actual_min < 0 or actual_max > 1:
+            warnings.warn(f"""DirectoryVisualizer target image must be in 0..1 range,
+                           but it ranges {actual_min}..{actual_max}""")
+        batch = {k: tens.detach().cpu().numpy() for k, tens in batch.items() if k in keys or k == 'mask'}
+        batch_size = batch['image'].shape[0]
+        items_to_vis = min(batch_size, 10)
+        result = []
+        for i in range(items_to_vis):
+            cur_dct = {k: tens[i] for k, tens in batch.items()}
+            result.append(
+                visualize_mask_and_images(
+                    cur_dct, keys, last_without_mask=True,
+                    rescale_keys=['discr_output_fake', 'discr_output_real']
+                )
+            )
+        vis_img = np.concatenate(result, axis=0)
+        vis_img = np.clip(vis_img * 255, 0, 255).astype('uint8')
+
+        out_fname = os.path.join(logdir, f'gs{global_step}-e{epoch}_pred.png')
+        vis_img = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(out_fname, vis_img)
