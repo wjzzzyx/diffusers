@@ -265,3 +265,12 @@ class Trainer():
     
     def get_lr_scheduler_state_dict(self):
         return self.lr_scheduler.state_dict()
+    
+    def load_model_state_dict(self, state_dict):
+        self.lora_model.module.load_state_dict(state_dict)
+    
+    def load_optimizer_state_dict(self, state_dict):
+        self.optimizer.load_state_dict(state_dict)
+    
+    def load_lr_scheduler_state_dict(self, state_dict):
+        self.lr_scheduler.load_state_dict(state_dict)
