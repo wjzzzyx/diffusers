@@ -19,6 +19,7 @@ import torch_utils
 import utils
 
 os.environ["TORCH_CUDNN_V8_API_ENABLED"] = "1"
+torch.autograd.set_detect_anomaly(True)
 
 
 def seed_all(seed):
@@ -157,7 +158,7 @@ def train(
     # prof = profiler.profile(
     #     activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
     #     schedule=profiler.schedule(skip_first=10, wait=1, warmup=1, active=1, repeat=1),
-    #     on_trace_ready=profiler.tensorboard_trace_hander(args.logdir),
+    #     on_trace_ready=profiler.tensorboard_trace_handler(args.logdir),
     #     record_shapes=False,
     #     profile_memory=False,
     #     with_stack=False
