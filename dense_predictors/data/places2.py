@@ -11,11 +11,11 @@ import utils
 
 
 class Places2Dataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, mode, target_size, maskgen_config):
+    def __init__(self, root_dir, mode, target_size, maskgen_config=None):
         self.root_dir = root_dir
         self.mode = mode
         if mode == "train":
-            self.fpaths = glob.glob(os.path.join(root_dir, "train", "**", "*.jpg"))
+            self.fpaths = glob.glob(os.path.join(root_dir, "train", "**", "*.jpg"), recursive=True)
             self.mask_generator = utils.instantiate_from_config(maskgen_config)
             self.transform = A.Compose([
                 A.Perspective(scale=(0.0, 0.06)),
@@ -30,11 +30,11 @@ class Places2Dataset(torch.utils.data.Dataset):
                 A.ToFloat()
             ])
         elif mode == "val":
-            self.mask_fpaths = glob.glob(os.path.join(root_dir, "val", "**", "*mask*.png"))
+            self.mask_fpaths = glob.glob(os.path.join(root_dir, "val", "**", "*mask*.png"), recursive=True)
             self.fpaths = [path.rsplit("_mask", 1)[0] + ".png" for path in self.mask_fpaths]
             self.transform = A.ToFloat()
         else:
-            self.mask_fpaths = glob.glob(os.path.join(root_dir, "visual_test", "**", "*mask*.png"))
+            self.mask_fpaths = glob.glob(os.path.join(root_dir, "visual_test", "**", "*mask*.png"), recursive=True)
             self.fpaths = [path.rsplit("_mask", 1)[0] + ".png" for path in self.mask_fpaths]
             self.transform = A.ToFloat()
     
@@ -42,13 +42,13 @@ class Places2Dataset(torch.utils.data.Dataset):
         return len(self.fpaths)
 
     def __getitem__(self, index):
-        image = np.array(Image.open(self.fpaths[index]))
+        image = np.array(Image.open(self.fpaths[index]).convert("RGB"))
         image = self.transform(image=image)["image"]
         if self.mode == "train":
-            mask = self.mask_generator(image.height, image.width)
+            mask = self.mask_generator(image.shape[0], image.shape[1])
         else:
             mask = np.array(Image.open(self.mask_fpaths[index]))
-        mask = mask[None] / 255.
+            mask = mask.astype(np.float32) / 255.
         image = torch.from_numpy(image).permute(2, 0, 1)
         mask = torch.from_numpy(mask).unsqueeze(0)
         return {

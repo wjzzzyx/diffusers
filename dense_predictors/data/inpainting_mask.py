@@ -49,8 +49,6 @@ class RandomIrregularMaskGenerator:
         cur_max_width = int(max(1, self.max_width * coef))
         cur_max_times = int(self.min_times + 1 + (self.max_times - self.min_times) * coef)
 
-        draw_method = DrawMethod(draw_method)
-
         mask = np.zeros((height, width), np.float32)
         times = random.randint(self.min_times, cur_max_times)
         for i in range(times):
@@ -64,11 +62,11 @@ class RandomIrregularMaskGenerator:
                 brush_w = 5 + np.random.randint(cur_max_width)
                 end_x = np.clip((start_x + length * np.sin(angle)).astype(np.int32), 0, width)
                 end_y = np.clip((start_y + length * np.cos(angle)).astype(np.int32), 0, height)
-                if draw_method == DrawMethod.LINE:
+                if self.draw_method == DrawMethod.LINE:
                     cv2.line(mask, (start_x, start_y), (end_x, end_y), 1.0, brush_w)
-                elif draw_method == DrawMethod.CIRCLE:
+                elif self.draw_method == DrawMethod.CIRCLE:
                     cv2.circle(mask, (start_x, start_y), radius=brush_w, color=1., thickness=-1)
-                elif draw_method == DrawMethod.SQUARE:
+                elif self.draw_method == DrawMethod.SQUARE:
                     radius = brush_w // 2
                     mask[start_y - radius:start_y + radius, start_x - radius:start_x + radius] = 1
                 start_x, start_y = end_x, end_y
@@ -232,6 +230,6 @@ class MixedMaskGenerator:
             self.probas.append(generator_config.probability)
 
     def __call__(self, height, width, iter_i=None):
-        gen = random.choices(self.gens, self.probas)
+        gen = random.choices(self.gens, self.probas)[0]
         mask = gen(height, width, iter_i=iter_i)
         return mask

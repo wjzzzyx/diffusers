@@ -1525,7 +1525,7 @@ class DistModel(BaseModel):
                     os.path.join(os.path.dirname(__file__), '..', '..', '..', 'models', 'lpips_models', f'{net}.pth'))
 
             if (not is_train):
-                self.net.load_state_dict(torch.load(model_path, **kw), strict=False)
+                self.net.load_state_dict(torch.load(model_path, **kw, weights_only=True), strict=False)
 
         elif (self.model == 'net'):  # pretrained network
             self.net = PNetLin(pnet_rand=pnet_rand, pnet_type=net, lpips=False)
@@ -1755,7 +1755,7 @@ class InpaintingEvaluatorOnline(nn.Module):
         """
         result = {}
         with torch.no_grad():
-            image_batch, mask_batch, inpainted_batch = batch[self.image_key], batch['mask'], batch[self.inpainted_key]
+            image_batch, mask_batch, inpainted_batch = batch[self.image_key].cuda(), batch['mask'].cuda(), batch[self.inpainted_key].cuda()
             if self.clamp_image_range is not None:
                 image_batch = torch.clamp(image_batch,
                                           min=self.clamp_image_range[0],
@@ -2601,18 +2601,21 @@ class Trainer():
         self.device = device
 
         generator = FFCResNetGenerator(**model_config.generator)
+        # Don't forget! And it still doesn't work for 1 gpu
+        generator = nn.SyncBatchNorm.convert_sync_batchnorm(generator)
         generator = generator.cuda()
-        generator = torch.compile(generator)
+        # generator = torch.compile(generator)
         self.generator = DistributedDataParallel(generator, device_ids=[device])
         discriminator = NLayerDiscriminator(**model_config.discriminator)
+        discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(discriminator)
         discriminator = discriminator.cuda()
-        discriminator = torch.compile(discriminator)
+        # discriminator = torch.compile(discriminator)
         self.discriminator = DistributedDataParallel(discriminator, device_ids=[device])
 
         self.loss_adv_fn = NonSaturatingWithR1(**loss_config.adversarial)
         self.loss_resnet_perceptual_fn = ResNetPL(**loss_config.resnet_pl).cuda()
         
-        self.val_evaluator = make_evaluator(**model_config.evaluator)
+        self.val_evaluator = make_evaluator(**model_config.evaluator).cuda()
         self.val_evaluator.requires_grad_(False)
 
         self.optimizer_g = torch.optim.Adam(self.generator.parameters(), lr=optimizer_config.generator_lr)
@@ -2623,8 +2626,8 @@ class Trainer():
         self.discriminator.train()
 
     def train_step(self, batch, global_step, epoch, batch_idx, logdir):        
-        image = batch['image']
-        mask = batch['mask']
+        image = batch['image'].cuda()
+        mask = batch['mask'].cuda()
         masked_image = image * (1 - mask)
         image_in = torch.cat([masked_image, mask], dim=1)
         output = self.generator(image_in)
@@ -2638,10 +2641,16 @@ class Trainer():
         self.optimizer_g.step()
 
         # optimize discriminator
-        output = self.generator(image_in)
-        loss, logdict_d = self.discriminator_loss(image, mask, output.detach())
+        output = self.generator(image_in).detach()
+        image.requires_grad = True    # ?
+        discr_real_pred, discr_real_features = self.discriminator(image)
+        discr_fake_pred, discr_fake_features = self.discriminator(output)
+        loss_d, logdict_d = self.loss_adv_fn.discriminator_loss(
+            real_batch=image, fake_batch=output, discr_real_pred=discr_real_pred, discr_fake_pred=discr_fake_pred, mask=mask
+        )
+        logdict_d['loss_d'] = loss_d.item()
         self.optimizer_d.zero_grad()
-        loss.backward()
+        loss_d.backward()
         nn.utils.clip_grad_norm_(self.discriminator.parameters(), 1.0)
         self.optimizer_d.step()
         
@@ -2651,11 +2660,9 @@ class Trainer():
             dirname = os.path.join(logdir, "log_images", "train")
             os.makedirs(dirname, exist_ok=True)
             with torch.inference_mode():
-                discr_output_real, _ = self.discriminator(image)
-                discr_output_fake, _ = self.discriminator(output)
                 image_size = image.shape[2:]
-                discr_output_real = F.interpolate(discr_output_real, size=image_size, mode="nearest")
-                discr_output_fake = F.interpolate(discr_output_fake, size=image_size, mode="nearest")
+                discr_output_real = F.interpolate(discr_real_pred, size=image_size, mode="nearest")
+                discr_output_fake = F.interpolate(discr_fake_pred, size=image_size, mode="nearest")
             log_image_dict = {
                 "image": image,
                 "mask": mask,
@@ -2721,7 +2728,7 @@ class Trainer():
         logdict['loss_d'] = loss_d.item()
         return loss_d, logdict
 
-    def on_train_epoch_end(self):
+    def on_train_epoch_end(self, epoch):
         return dict()
 
     def on_val_epoch_start(self):
@@ -2732,10 +2739,10 @@ class Trainer():
 
     @torch.no_grad()
     def val_step(self, batch, global_step, epoch, batch_idx, logdir):
-        image = batch['image']
-        mask = batch['mask']
+        image = batch['image'].cuda()
+        mask = batch['mask'].cuda()
         masked_image = image * (1 - mask)
-        image_in = torch.cat([masked_image, batch['mask']], dim=1)
+        image_in = torch.cat([masked_image, mask], dim=1)
         output = self.generator(image_in)
         inpainted = masked_image + output * mask
         batch["predicted_image"] = output.detach()
@@ -2765,7 +2772,7 @@ class Trainer():
         
         self.val_step_logs.append(logdict)
         self.val_step_states.append(self.val_evaluator(batch))
-        return logdict
+
 
     def on_val_epoch_end(self, dataset_name, dataset, logdir):
         pd.set_option('display.max_columns', 500)
@@ -2775,6 +2782,9 @@ class Trainer():
         val_evaluator_res_df = pd.DataFrame(val_evaluator_res).stack(1).unstack(0)
         val_evaluator_res_df.dropna(axis=1, how='all', inplace=True)
         return flatten_dict(val_evaluator_res)
+
+    def log_step(self, logdir, global_step, epoch, batch_idx):
+        return self.logdict
 
     @torch.no_grad()
     def log_image(self, logdir, global_step, epoch, batch):
@@ -2786,7 +2796,7 @@ class Trainer():
                            but it ranges {actual_min}..{actual_max}""")
         batch = {k: tens.detach().cpu().numpy() for k, tens in batch.items() if k in keys or k == 'mask'}
         batch_size = batch['image'].shape[0]
-        items_to_vis = min(batch_size, 10)
+        items_to_vis = min(batch_size, 8)
         result = []
         for i in range(items_to_vis):
             cur_dct = {k: tens[i] for k, tens in batch.items()}

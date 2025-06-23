@@ -2,7 +2,7 @@ exp_name: lama_reimplement
 
 trainer:
   seed: 42
-  target: dense_predictors.model.lama.PLBase
+  target: dense_predictors.model.lama.Trainer
   model_config:
     generator:
       input_nc: 4
@@ -16,12 +16,12 @@ trainer:
         ratio_gout: 0
         enable_lfu: false
       downsample_conv_kwargs:
-        ratio_gin: ${model.params.model_config.generator.init_conv_kwargs.ratio_gout}
-        ratio_gout: ${model.params.model_config.generator.downsample_conv_kwargs.ratio_gin}
+        ratio_gin: ${trainer.model_config.generator.init_conv_kwargs.ratio_gout}
+        ratio_gout: ${trainer.model_config.generator.downsample_conv_kwargs.ratio_gin}
         enable_lfu: false
       resnet_conv_kwargs:
         ratio_gin: 0.75
-        ratio_gout: ${model.params.model_config.generator.resnet_conv_kwargs.ratio_gin}
+        ratio_gout: ${trainer.model_config.generator.resnet_conv_kwargs.ratio_gin}
         enable_lfu: false
     discriminator:
       input_nc: 3
@@ -46,7 +46,9 @@ trainer:
     resnet_pl:
       weight: 30
       weights_path: /mnt/sdb/lama/ade20k/ade20k-resnet50dilated-ppm_deepsup/encoder_epoch_20.pth
-  optimizer_config: {}
+  optimizer_config:
+    generator_lr: 0.001
+    discriminator_lr: 0.0001
 
 data:
   batch_size: 10
@@ -59,28 +61,35 @@ data:
       mode: train
       target_size: 256
       maskgen_config:
-        irregular_proba: 1
-        irregular_kwargs:
-          max_angle: 4
-          max_len: 200
-          max_width: 100
-          max_times: 5
-          min_times: 1
-        box_proba: 1
-        box_kwargs:
-          margin: 10
-          bbox_min_size: 30
-          bbox_max_size: 150
-          max_times: 4
-          min_times: 1
-        segm_proba: 0
+        target: dense_predictors.data.inpainting_mask.MixedMaskGenerator
+        params:
+          generator_configs:
+            - target: dense_predictors.data.inpainting_mask.RandomIrregularMaskGenerator
+              probability: 0.5
+              params:
+                max_angle: 4
+                max_len: 200
+                max_width: 100
+                max_times: 5
+                min_times: 1
+            - target: dense_predictors.data.inpainting_mask.RandomRectangleMaskGenerator
+              probability: 0.5
+              params:
+                margin: 10
+                bbox_min_size: 30
+                bbox_max_size: 150
+                max_times: 4
+                min_times: 1
+
   val:
-    - target: dense_predictors.data.places2.Places2Dataset
+    - name: val
+      target: dense_predictors.data.places2.Places2Dataset
       params:
         root_dir: /mnt/sdb/data_places365
         mode: val
         target_size: 256
-    - target: dense_predictors.data.places2.Places2Dataset
+    - name: visual_test
+      target: dense_predictors.data.places2.Places2Dataset
       params:
         root_dir: /mnt/sdb/data_places365
         mode: test
