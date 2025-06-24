@@ -1359,7 +1359,7 @@ class Trainer():
         
         if batch_idx % 100 == 0:
             dirname = os.path.join(logdir, "log_images", "val")
-            os.makedir(dirname, exist_ok=True)
+            os.makedirs(dirname, exist_ok=True)
             image_list = list()
             for i in range(len(batch)):
                 image_list.append(
