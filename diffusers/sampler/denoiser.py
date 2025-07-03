@@ -138,11 +138,13 @@ class KarrasDenoiser():
 class KarrasEpsDenoiser(KarrasDenoiser):
     """A wrapper for my StabilityAI diffusion models."""
     def __init__(self, model, alphas_cumprod):
-        super().__init__(alphas_cumprod.to(model.device), quantize=False)
+        super().__init__(alphas_cumprod, quantize=False)
         self.inner_model = model
         self.sigma_data = 1.
 
     def __call__(self, xt, sigma, **kwargs):
+        self.sigmas = self.sigmas.to(xt.device)
+        self.log_sigmas = self.log_sigmas.to(xt.device)
         c_out = -sigma
         c_in = 1 / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
         eps = self.inner_model.forward_diffusion_model(
@@ -153,11 +155,13 @@ class KarrasEpsDenoiser(KarrasDenoiser):
 
 class KarrasVDenoiser(KarrasDenoiser):
     def __init__(self, model, alphas_cumprod):
-        super().__init__(alphas_cumprod.to(model.device), quantize=False)
+        super().__init__(alphas_cumprod, quantize=False)
         self.inner_model = model
         self.sigma_data = 1.
     
     def __call__(self, xt, sigma, **kwargs):
+        self.sigmas = self.sigmas.to(xt.device)
+        self.log_sigmas = self.log_sigmas.to(xt.device)
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
         c_out = -sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
         c_in = 1 / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
