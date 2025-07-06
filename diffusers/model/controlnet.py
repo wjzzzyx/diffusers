@@ -47,7 +47,6 @@ class ControlledUnetModel(UNetModel):
 class ControlNetEncoder(nn.Module):
     def __init__(
             self,
-            image_size,
             in_channels,
             model_channels,
             hint_channels,
@@ -95,7 +94,6 @@ class ControlNetEncoder(nn.Module):
             assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
 
         self.dims = dims
-        self.image_size = image_size
         self.in_channels = in_channels
         self.model_channels = model_channels
         if isinstance(num_res_blocks, int):
@@ -331,7 +329,7 @@ class Trainer():
     def __init__(self, model_config, loss_config, optimizer_config, device):
         self.device = device
         
-        self.unet = ControlledUnetModel(**model_config.unet_config).cuda()
+        self.unet = utils.instantiate_from_config(model_config.unet_config).cuda()
         self.unet.eval()
         self.unet.requires_grad_(False)
         self.vae = utils.instantiate_from_config(model_config.first_stage_config).cuda()
@@ -344,7 +342,6 @@ class Trainer():
         self.controlnet = DistributedDataParallel(controlnet, device_ids=[device])
         self.sampler = utils.instantiate_from_config(model_config.sampler_config)
         self.control_scales = [1.0] * (len(controlnet.input_blocks) + 1)
-        
 
         # prepare loss
         self.diffusion_loss_fn = utils.instantiate_from_config(loss_config)

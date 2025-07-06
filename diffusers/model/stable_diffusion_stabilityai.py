@@ -837,6 +837,7 @@ class UNetModel(nn.Module):
         disable_middle_self_attn=False,
         use_linear_in_transformer=False,
         adm_in_channels=None,
+        pretrained=None,
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -1110,6 +1111,14 @@ class UNetModel(nn.Module):
                 conv_nd(dims, model_channels, n_embed, 1),
                 #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
             )
+        
+        if pretrained is not None:
+            if pretrained.endswith('safetensors'):
+                checkpoint = safetensors.torch.load_file(pretrained, device='cpu')
+            else:
+                checkpoint = torch.load(pretrained, map_location='cpu')
+            state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
+            missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=True)
 
     def convert_to_fp16(self):
         """
