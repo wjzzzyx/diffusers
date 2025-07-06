@@ -36,51 +36,66 @@ class DPMSampler():
         self.uses_ensd = uses_ensd
         self.num_train_steps = num_train_steps
         self.num_inference_steps = num_inference_steps
+        self.initial_noise_multiplier = initial_noise_multiplier
+        self.denoising_strength = denoising_strength
         self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        self.initial_noise_multiplier = initial_noise_multiplier
-        self.denoising_strength = denoising_strength
+        self.sigmas = torch.sqrt((1 - self.alphas_cumprod) / self.alphas_cumprod)
+        self.log_sigmas = self.sigmas.log()
 
-    def get_sigmas(self, denoiser):
+    def get_inference_sigmas(self):
         steps = self.num_inference_steps + 1 if self.discard_next_to_last_sigma else self.num_inference_steps
 
         if self.scheduler == 'karras':
             sigmas = k_diffusion.sampling.get_sigmas_karras(
-                n=steps, sigma_min=denoiser.sigma_min, sigma_max=denoiser.sigma_max
+                n=steps, sigma_min=self.sigmas[0].item(), sigma_max=self.sigmas[-1].item()
             )
         elif self.scheduler == 'exponential':
             sigmas = k_diffusion.sampling.get_sigmas_exponential(
-                n=steps, sigma_min=denoiser.sigma_min, sigma_max=denoiser.sigma_max
+                n=steps, sigma_min=self.sigmas[0].item(), sigma_max=self.sigmas[-1].item()
             )
         else:
-            t_max = len(denoiser.sigmas) - 1
-            t = torch.linspace(t_max, 0, steps, device=denoiser.inner_model.device)
-            sigmas = torch.cat([denoiser.t_to_sigma(t), t.new_zeros([1])])
+            t = torch.linspace(self.num_train_steps - 1, 0, steps)
+            sigmas = torch.cat([self.t_to_sigma(t), t.new_zeros([1])])
         
         if self.discard_next_to_last_sigma:
             sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
         
         return sigmas
     
+    def sigma_to_t(self, sigma):
+        log_sigma = sigma.log()
+        dists = log_sigma - self.log_sigmas[:, None]
+        low_idx = dists.ge(0).cumsum(dim=0).argmax(dim=0).clamp(max=self.log_sigmas.shape[0] - 2)
+        high_idx = low_idx + 1
+        low, high = self.log_sigmas[low_idx], self.log_sigmas[high_idx]
+        w = (low - log_sigma) / (low - high)
+        w = w.clamp(0, 1)
+        t = (1 - w) * low_idx + w * high_idx
+        return t.view(sigma.shape)
+
+    def t_to_sigma(self, t):
+        t = t.float()
+        low_idx, high_idx, w = t.floor().long(), t.ceil().long(), t.frac()
+        log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
+        return log_sigma.exp()
+    
     def sample(
         self,
         denoiser,
-        batch_size: int,
-        image_shape: Sequence = None,
+        noise: torch.Tensor,
         image: torch.Tensor = None,
         denoiser_args: dict = {},
         generator = None
     ) -> torch.Tensor:
         t_enc = min(int(self.denoising_strength * self.num_inference_steps), self.num_inference_steps - 1)
-        sigmas = self.get_sigmas(denoiser).to(denoiser.inner_model.device)
+        sigmas = self.get_inference_sigmas()
         sigmas = sigmas[self.num_inference_steps - t_enc - 1:]
 
         if image is not None:
-            noise = torch.randn(image.shape, device=image.device, generator=generator)
             xi = image + noise * sigmas[0]
         else:
-            noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
             xi = noise * sigmas[0]
 
         if self.sampler == 'dpmpp_2m':
