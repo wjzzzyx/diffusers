@@ -1,0 +1,83 @@
+trainer:
+  seed: 42
+  target: diffusers.model.controlnet.Trainer
+  model_config:
+    control_stage_config:
+      in_channels: 4
+      hint_channels: 3
+      model_channels: 320
+      attention_resolutions: [4, 2, 1]
+      num_res_blocks: 2
+      channel_mult: [1, 2, 4, 4]
+      num_heads: 8
+      use_spatial_transformer: True
+      transformer_depth: 1
+      context_dim: 768
+      use_checkpoint: True
+      legacy: False
+    first_stage_config:
+      target: diffusers.model.vae.AutoEncoderKL
+      params:
+        in_channels: 3
+        base_channels: 128
+        out_channels: 3
+        z_channels: 4
+        ch_mult: [1, 2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        pretrained:
+    cond_stage_config:
+      target: diffusers.model.text_encoder.CLIPTextEncoder
+      params:
+        version: openai/clip-vit-large-patch14
+        layer: last
+        layer_idx: -1
+    unet_config:
+      target: diffusers.model.controlnet.ControlledUnetModel
+      params:
+        image_size: 32 # unused
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [4, 2, 1]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4]
+        num_heads: 8
+        use_spatial_transformer: True
+        transformer_depth: 1
+        context_dim: 768
+        use_checkpoint: True
+        legacy: False
+        pretrained:
+  loss_config:
+  optimizer_config:
+
+data:
+  batch_size: 8
+  val_batch_size: 8
+  num_workers: 1
+  train:
+    target:
+    params:
+      root_dir:
+      mode: train
+  val:
+    - name:
+      target:
+      params:
+        root_dir:
+        mode: val
+  test:
+    - name:
+      target:
+      params:
+        root_dir:
+        mode: test
+
+train_config:
+  num_epochs: 100
+  eval_interval: 10
+  ckpt_interval: 10
+  log_interval: 10
+  save_optimizer_states: False
