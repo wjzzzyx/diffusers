@@ -608,7 +608,9 @@ class AutoEncoderKL(nn.Module):
         num_res_blocks,
         attn_resolutions,
         dropout = 0.0,
-        attn_type = 'vanilla'
+        attn_type = 'vanilla',
+        scale_factor = 0.18215,
+        pretrained = None
     ):
         super().__init__()
         self.encoder = Encoder(
@@ -621,6 +623,12 @@ class AutoEncoderKL(nn.Module):
         )
         self.quant_conv = nn.Conv2d(2 * z_channels, 2 * z_channels, 1)
         self.post_quant_conv = nn.Conv2d(z_channels, z_channels, 1)
+
+        self.scale_factor = scale_factor
+
+        if pretrained is not None:
+            checkpoint = torch.load(pretrained, map_location="cpu", weights_only=True)
+            missing, unexpected = self.load_state_dict(checkpoint, strict=False, assign=True)
     
     def forward(self, x, sample_posterior=True):
         posterior = self.encode(x)
