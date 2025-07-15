@@ -30,12 +30,12 @@ class Places2Dataset(torch.utils.data.Dataset):
                 A.ToFloat()
             ])
         elif mode == "val":
-            self.mask_fpaths = glob.glob(os.path.join(root_dir, "val", "**", "*mask*.png"), recursive=True)
-            self.fpaths = [path.rsplit("_mask", 1)[0] + ".png" for path in self.mask_fpaths]
+            self.fpaths = sorted(glob.glob(os.path.join(root_dir, "val", "images/*")))
+            self.mask_fpaths = sorted(glob.glob(os.path.join(root_dir, "val", "masks/*")))
             self.transform = A.ToFloat()
         else:
-            self.mask_fpaths = glob.glob(os.path.join(root_dir, "visual_test", "**", "*mask*.png"), recursive=True)
-            self.fpaths = [path.rsplit("_mask", 1)[0] + ".png" for path in self.mask_fpaths]
+            self.fpaths = sorted(glob.glob(os.path.join(root_dir, "test", "images/*")))
+            self.mask_fpaths = sorted(glob.glob(os.path.join(root_dir, "test", "masks/*")))
             self.transform = A.ToFloat()
     
     def __len__(self):
@@ -54,5 +54,5 @@ class Places2Dataset(torch.utils.data.Dataset):
         return {
             "image": image,
             "mask": mask,
-            "fpath": self.fpaths[index]
+            "fpath": "_".join(self.fpaths[index].rsplit("/", 1))
         }

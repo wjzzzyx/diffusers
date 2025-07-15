@@ -2812,3 +2812,18 @@ class Trainer():
         out_fname = os.path.join(logdir, f'gs{global_step}-e{epoch}_pred.png')
         vis_img = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
         cv2.imwrite(out_fname, vis_img)
+    
+    def get_model_state_dict(self):
+        return {
+            "generator": self.generator.module.state_dict(),
+            "discriminator": self.discriminator.module.state_dict(),
+        }
+    
+    def get_optimizer_state_dict(self):
+        return {
+            "optimizer_g": self.optimizer_g.state_dict(),
+            "optimizer_d": self.optimizer_d.state_dict(),
+        }
+    
+    def get_lr_scheduler_state_dict(self):
+        return self.lr_scheduler.state_dict()
