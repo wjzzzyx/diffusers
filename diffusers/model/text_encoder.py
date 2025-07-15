@@ -100,6 +100,7 @@ class TextEncoderUnlimited(nn.Module):
 
 class TextEncoderWeighted(TextEncoderUnlimited):
     def forward(self, texts):
+        # texts must be a list of strings
         texts_with_weights = self.parse_weighted_text(texts)
         tokens, weights = self.get_tokens(texts_with_weights)
         chunks, chunk_weights = self.split_chunks(tokens, weights)    # list(batch) of list(chunk)
