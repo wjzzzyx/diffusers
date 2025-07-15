@@ -1189,7 +1189,7 @@ class StableDiffusion_StabilityAI(nn.Module):
             if model_config.pretrained.endswith('safetensors'):
                 checkpoint = safetensors.torch.load_file(model_config.pretrained, device='cpu')
             else:
-                checkpoint = torch.load(model_config.pretrained, map_location='cpu')
+                checkpoint = torch.load(model_config.pretrained, map_location='cpu', weights_only=True)
             state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
             replace_substring_in_state_dict_if_present(state_dict, 'model.diffusion_model', 'diffusion_model')
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
