@@ -14,8 +14,8 @@ class DPMSampler():
         discard_next_to_last_sigma: bool,
         second_order: bool,
         uses_ensd: bool,
-        num_train_steps: int,
-        num_inference_steps: int,
+        num_train_timesteps: int,
+        num_inference_timesteps: int,
         beta_start: float,
         beta_end: float,
         beta_schedule: str,
@@ -34,18 +34,18 @@ class DPMSampler():
         self.discard_next_to_last_sigma = discard_next_to_last_sigma
         self.second_order = second_order
         self.uses_ensd = uses_ensd
-        self.num_train_steps = num_train_steps
-        self.num_inference_steps = num_inference_steps
+        self.num_train_timesteps = num_train_timesteps
+        self.num_inference_timesteps = num_inference_timesteps
         self.initial_noise_multiplier = initial_noise_multiplier
         self.denoising_strength = denoising_strength
-        self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
+        self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_timesteps).cuda()
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.sigmas = torch.sqrt((1 - self.alphas_cumprod) / self.alphas_cumprod)
         self.log_sigmas = self.sigmas.log()
 
     def get_inference_sigmas(self):
-        steps = self.num_inference_steps + 1 if self.discard_next_to_last_sigma else self.num_inference_steps
+        steps = self.num_inference_timesteps + 1 if self.discard_next_to_last_sigma else self.num_inference_timesteps
 
         if self.scheduler == 'karras':
             sigmas = k_diffusion.sampling.get_sigmas_karras(
@@ -56,7 +56,7 @@ class DPMSampler():
                 n=steps, sigma_min=self.sigmas[0].item(), sigma_max=self.sigmas[-1].item()
             )
         else:
-            t = torch.linspace(self.num_train_steps - 1, 0, steps)
+            t = torch.linspace(self.num_train_timesteps - 1, 0, steps)
             sigmas = torch.cat([self.t_to_sigma(t), t.new_zeros([1])])
         
         if self.discard_next_to_last_sigma:
@@ -89,9 +89,9 @@ class DPMSampler():
         denoiser_args: dict = {},
         generator = None
     ) -> torch.Tensor:
-        t_enc = min(int(self.denoising_strength * self.num_inference_steps), self.num_inference_steps - 1)
-        sigmas = self.get_inference_sigmas()
-        sigmas = sigmas[self.num_inference_steps - t_enc - 1:]
+        t_enc = min(int(self.denoising_strength * self.num_inference_timesteps), self.num_inference_timesteps - 1)
+        sigmas = self.get_inference_sigmas().cuda()
+        sigmas = sigmas[self.num_inference_timesteps - t_enc - 1:]
 
         if image is not None:
             xi = image + noise * sigmas[0]
