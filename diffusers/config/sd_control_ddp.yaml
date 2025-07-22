@@ -1,8 +1,11 @@
+exp_name: controlnet_places2_inpaint
+
 trainer:
   seed: 42
   target: diffusers.model.controlnet.Trainer
   model_config:
     control_stage_config:
+      pretrained: diffusers/pretrained/sd-v1-5-pruned-unet.pth
       in_channels: 4
       hint_channels: 3
       model_channels: 320
@@ -26,7 +29,7 @@ trainer:
         num_res_blocks: 2
         attn_resolutions: []
         dropout: 0.0
-        pretrained:
+        pretrained: diffusers/pretrained/sd-v1-5-pruned-vae.pth
     cond_stage_config:
       target: diffusers.model.text_encoder.CLIPTextEncoder
       params:
@@ -49,35 +52,78 @@ trainer:
         context_dim: 768
         use_checkpoint: True
         legacy: False
-        pretrained:
-  loss_config:
+        pretrained: diffusers/pretrained/sd-v1-5-pruned-unet.pth
+    sampler_config:
+      target: diffusers.sampler.sample_dpm.DPMSampler
+      params:
+        sampler: dpmpp_2m
+        scheduler: karras
+        solver_type: none
+        discard_next_to_last_sigma: False
+        second_order: False
+        uses_ensd: False
+        num_train_timesteps: 1000
+        num_inference_timesteps: 20
+        beta_start: 0.00085
+        beta_end: 0.012
+        beta_schedule: sqrt_linear
+  loss_config: null
   optimizer_config:
+    optimizer: torch.optim.AdamW
+    base_lr: 0.0001
+    lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+    lr_scheduler_params:
+      T_max: 100000
+      eta_min: 0.0001
 
 data:
-  batch_size: 8
+  batch_size: 512
   val_batch_size: 8
   num_workers: 1
   train:
-    target:
+    target: dense_predictors.data.places2.Places2Dataset
     params:
       root_dir:
       mode: train
+      target_size: 256
+      maskgen_config:
+        target: dense_predictors.data.inpainting_mask.MixedMaskGenerator
+        params:
+          generator_configs:
+            - target: dense_predictors.data.inpainting_mask.RandomIrregularMaskGenerator
+              probability: 0.5
+              params:
+                max_angle: 4
+                max_len: 200
+                max_width: 100
+                max_times: 5
+                min_times: 1
+            - target: dense_predictors.data.inpainting_mask.RandomRectangleMaskGenerator
+              probability: 0.5
+              params:
+                margin: 10
+                bbox_min_size: 30
+                bbox_max_size: 150
+                max_times: 4
+                min_times: 1
   val:
-    - name:
-      target:
+    - name: val
+      target: dense_predictors.data.places2.Places2Dataset
       params:
         root_dir:
         mode: val
+        target_size: 256
   test:
-    - name:
-      target:
+    - name: visual_test
+      target: dense_predictors.data.places2.Places2Dataset
       params:
         root_dir:
         mode: test
+        target_size: 256
 
 train_config:
   num_epochs: 100
-  eval_interval: 10
-  ckpt_interval: 10
-  log_interval: 10
+  eval_interval: 1000
+  ckpt_interval: 10000000
+  log_interval: 500
   save_optimizer_states: False

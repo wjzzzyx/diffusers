@@ -1,5 +1,6 @@
 import os
 import collections
+import itertools
 import numpy as np
 from PIL import Image
 import pyiqa
@@ -8,6 +9,7 @@ import safetensors
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 
 from diffusers.model.stable_diffusion_stabilityai import (
@@ -46,33 +48,34 @@ class ControlledUnetModel(UNetModel):
 
 class ControlNetEncoder(nn.Module):
     def __init__(
-            self,
-            in_channels,
-            model_channels,
-            hint_channels,
-            num_res_blocks,
-            attention_resolutions,
-            dropout=0,
-            channel_mult=(1, 2, 4, 8),
-            conv_resample=True,
-            dims=2,
-            use_checkpoint=False,
-            use_fp16=False,
-            num_heads=-1,
-            num_head_channels=-1,
-            num_heads_upsample=-1,
-            use_scale_shift_norm=False,
-            resblock_updown=False,
-            use_new_attention_order=False,
-            use_spatial_transformer=False,  # custom transformer support
-            transformer_depth=1,  # custom transformer support
-            context_dim=None,  # custom transformer support
-            n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
-            legacy=True,
-            disable_self_attentions=None,
-            num_attention_blocks=None,
-            disable_middle_self_attn=False,
-            use_linear_in_transformer=False,
+        self,
+        in_channels,
+        model_channels,
+        hint_channels,
+        num_res_blocks,
+        attention_resolutions,
+        dropout=0,
+        channel_mult=(1, 2, 4, 8),
+        conv_resample=True,
+        dims=2,
+        use_checkpoint=False,
+        use_fp16=False,
+        num_heads=-1,
+        num_head_channels=-1,
+        num_heads_upsample=-1,
+        use_scale_shift_norm=False,
+        resblock_updown=False,
+        use_new_attention_order=False,
+        use_spatial_transformer=False,  # custom transformer support
+        transformer_depth=1,  # custom transformer support
+        context_dim=None,  # custom transformer support
+        n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
+        legacy=True,
+        disable_self_attentions=None,
+        num_attention_blocks=None,
+        disable_middle_self_attn=False,
+        use_linear_in_transformer=False,
+        pretrained=None
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -273,6 +276,14 @@ class ControlNetEncoder(nn.Module):
         self.middle_block_out = self.make_zero_conv(ch)
         self._feature_size += ch
 
+        if pretrained is not None:
+            if pretrained.endswith("safetensors"):
+                checkpoint = sefatensors.torch.load_file(pretrained, device="cpu")
+            else:
+                checkpoint = torch.load(pretrained, map_location="cpu", weights_only=True)
+            state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
+            missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=True)
+
     def make_zero_conv(self, channels):
         return TimestepEmbedSequential(zero_module(conv_nd(self.dims, channels, channels, 1, padding=0)))
 
@@ -332,19 +343,24 @@ class Trainer():
         self.unet = utils.instantiate_from_config(model_config.unet_config).cuda()
         self.unet.eval()
         self.unet.requires_grad_(False)
+        self.unet = self.unet.to(memory_format=torch.channels_last)
         self.vae = utils.instantiate_from_config(model_config.first_stage_config).cuda()
         self.vae.eval()
         self.vae.requires_grad_(False)
+        self.vae = self.vae.to(memory_format=torch.channels_last)
         clip = utils.instantiate_from_config(model_config.cond_stage_config).cuda()
-        self.cond_prompt = clip("best quality, high resolution")
+        with torch.no_grad():
+            self.cond_prompt = clip(["best quality, high resolution"])
+        clip.cpu()
         del clip
         controlnet = ControlNetEncoder(**model_config.control_stage_config).cuda()
+        controlnet = controlnet.to(memory_format=torch.channels_last)
         self.controlnet = DistributedDataParallel(controlnet, device_ids=[device])
         self.sampler = utils.instantiate_from_config(model_config.sampler_config)
         self.control_scales = [1.0] * (len(controlnet.input_blocks) + 1)
 
         # prepare loss
-        self.diffusion_loss_fn = utils.instantiate_from_config(loss_config)
+        # self.diffusion_loss_fn = utils.instantiate_from_config(loss_config)
 
         # prepare optimizer
         self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
@@ -357,7 +373,7 @@ class Trainer():
 
         # prepare metrics
         self.loss_meters = {
-            "loss_mse": torch_utils.RunningStatistic(device),
+            "loss_l2": torch_utils.RunningStatistic(device),
             "loss_adv_g": torch_utils.RunningStatistic(device),
             "loss_adv_d": torch_utils.RunningStatistic(device),
         }
@@ -369,35 +385,42 @@ class Trainer():
 
     def train_step(self, batch, global_step, epoch, batch_idx, logdir):
         batch_size = batch['image'].shape[0]
-        images = batch['image'].cuda()
-        masks = batch['mask'].cuda()
+        images = batch['image'].cuda(non_blocking=True)
+        images = images.to(memory_format=torch.channels_last)
+        images = images * 2 - 1
+        masks = batch['mask'].cuda(non_blocking=True)
+        masks = masks.to(memory_format=torch.channels_last)
         masked_images = images * (1 - masks)
         cond_images = torch.cat([masked_images, masks], dim=1)
         with torch.no_grad():
             latents = self.vae.encode(images).sample()
+            latents = self.vae.scale_factor * latents
         noise = torch.randn_like(latents)
         time = torch.randint(0, self.sampler.num_train_timesteps, (images.shape[0],), device=self.device)
         alphas_cumprod_t = self.sampler.alphas_cumprod[time][(...,) + (None,) * 3]
         xt = torch.sqrt(alphas_cumprod_t) * latents + torch.sqrt(1 - alphas_cumprod_t) * noise
         cond_feats = self.controlnet(xt, cond_images, time, self.cond_prompt)
-        output = self.unet(xt, time, context=self.cond_prompt, control=cond_feats)
-        loss_l2 = self.diffusion_loss_fn(output, xt, noise, time)
+        with torch.autocast("cuda", torch.bfloat16):
+            output = self.unet(xt, time, context=self.cond_prompt, control=cond_feats)
+            # loss_l2 = self.diffusion_loss_fn(output, xt, noise, time)
+            loss_l2 = F.mse_loss(output, noise, reduction="mean")
         loss_l2.backward()
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self.lr_scheduler.step()
-        self.loss_meters["loss_l2"].update(loss_l2.item(), batch_size)
+        self.loss_meters["loss_l2"].update(loss_l2, batch_size)
 
-        if global_step % 1000 == 0 and dist.get_rank() == 0:
+        if global_step % 1000 == 0:
             dirname = os.path.join(logdir, "log_images", "train")
             os.makedirs(dirname, exist_ok=True)
             with torch.no_grad():
-                pred_x0 = xt + time.view(-1, 1, 1, 1) * output
+                pred_x0 = (xt - torch.sqrt(1 - alphas_cumprod_t) * output) / torch.sqrt(alphas_cumprod_t)
                 pred_x0 = pred_x0 / self.vae.scale_factor
                 pred = self.vae.decode(pred_x0)
                 pred = (pred.clamp(-1, 1) + 1) / 2
             log_image_dict = {
-                "image": images,
+                "image": (images + 1) / 2,
+                "masked_image": (masked_images + 1) / 2,
                 "mask": masks,
                 "pred": pred,
                 "fpath": batch["fpath"]
@@ -428,14 +451,16 @@ class Trainer():
 
     @torch.no_grad()
     def val_step(self, batch, global_step, epoch, batch_idx, logdir):
+        batch_size = len(batch["image"])
         images = batch['image'].cuda()
+        images = images * 2 - 1
         masks = batch['mask'].cuda()
         masked_images = images * (1 - masks)
         cond_images = torch.cat([masked_images, masks], dim=1)
-        latents = self.vae.encode(images).sample()
-        latents = self.vae.scale_factor * latents
+        # latents = self.vae.encode(images).sample()
+        # latents = self.vae.scale_factor * latents
         generator = torch.Generator(self.device).manual_seed(0)
-        noise = torch.randn(latents.shape, device=self.device, generator=generator)
+        noise = torch.randn((batch_size, 4, images.shape[2] // 8, images.shape[3] // 8), device=self.device, generator=generator)
 
         preds = self.sampler.sample(
             self.denoiser,
@@ -447,19 +472,22 @@ class Trainer():
         preds = self.vae.decode(preds)
         preds = (preds.clamp(-1, 1) + 1) / 2
         preds_np = (preds * 255).type(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        os.makedirs(os.path.join(logdir, "val_preds"), exist_ok=True)
         for pred_np, fpath in zip(preds_np, batch["fpath"]):
             fname = os.path.basename(fpath)
             Image.fromarray(pred_np).save(os.path.join(logdir, "val_preds", fname))
         
-        self.val_metrics["psnr"].append(self.psnr(preds, images))
-        self.val_metrics["ssim"].append(self.ssim(preds, images))
-        self.val_metrics["lpips"].append(self.lpips(preds, images))
+        images = (images + 1) / 2
+        self.val_metrics["psnr"].extend(self.psnr(preds, images).tolist())
+        self.val_metrics["ssim"].extend(self.ssim(preds, images).tolist())
+        self.val_metrics["lpips"].extend(self.lpips(preds, images).flatten().tolist())
 
         if batch_idx % 100 == 0:
             dirname = os.path.join(logdir, "log_images", "val")
             os.makedirs(dirname, exist_ok=True)
             log_image_dict = {
                 "image": images,
+                "masked_image": (masked_images + 1) / 2,
                 "mask": masks,
                 "pred": preds,
                 "fpath": batch["fpath"]
@@ -483,26 +511,37 @@ class Trainer():
     
     def on_val_epoch_end(self, dataset_name, dataset, logdir):
         for key, val in self.val_metrics.items():
-            self.val_metrics[key] = sum(val) / len(val)
+            if dist.get_rank() == 0:
+                scores = [None for _ in range(dist.get_world_size())]
+                dist.gather_object(val, scores, dst=0)
+                scores = list(itertools.chain(*scores))
+                self.val_metrics[key] = sum(scores) / len(scores)
+            else:
+                dist.gather_object(val, None, dst=0)
+                self.val_metrics[key] = 0
         self.lpips.cpu()
-        self.val_metrics["fid"] = self.fid(
-            os.path.join(logdir, "val_preds"), os.path.join(dataset.root_dir, "val", "images")
-        )
-        self.fid.cpu()
+        # if dist.get_rank() == 0:
+        #     self.val_metrics["fid"] = self.fid(
+        #         os.path.join(logdir, "val_preds"), os.path.join(dataset.root_dir, "val", "images")
+        #     )
+        # self.fid.cpu()
         return self.val_metrics
     
     def log_image(self, logdir, global_step, epoch, log_image_dict):
-        images = (log_image_dict["image"] * 255).type(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        masks = (log_image_dict["mask"] * 255).type(torch.uint8).cpu().numpy()
-        preds = (log_image_dict["pred"] * 255).type(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        images = log_image_dict["image"].permute(0, 2, 3, 1).cpu().numpy()
+        masked_images = log_image_dict["masked_image"].permute(0, 2, 3, 1).cpu().numpy()
+        masks = log_image_dict["mask"].type(torch.uint8).squeeze(1).cpu().numpy()
+        preds = log_image_dict["pred"].permute(0, 2, 3, 1).cpu().numpy()
         fpaths = log_image_dict["fpath"]
         margin = 4
+        width = images.shape[1]
         for i in range(len(fpaths)):
             fname = os.path.basename(fpaths[i])
             pred_fname = os.path.splitext(fname)[0] + f"_gs{global_step}_e{epoch}_pred.png"
             image = skimage.segmentation.mark_boundaries(images[i], masks[i], color=(1., 0., 0.), mode='thick')
             pred = skimage.segmentation.mark_boundaries(preds[i], masks[i], color=(1., 0., 0.), mode='thick')
-            vis = np.zeros((image.shape[0], image.shape[1] + margin + pred.shape[1], 3), dtype=np.uint8)
-            vis[:, :image.shape[1]] = image
-            vis[:, -pred.shape[1]:] = pred
+            vis = np.zeros((image.shape[0], width * 3 + margin * 2, 3), dtype=np.uint8)
+            vis[:, :width] = (image * 255).astype("uint8")
+            vis[:, width + margin : width + margin + width] = (masked_images[i] * 255).astype("uint8")
+            vis[:, -width:] = (pred * 255).astype("uint8")
             Image.fromarray(vis).save(os.path.join(logdir, pred_fname))
