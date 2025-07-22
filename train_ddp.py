@@ -20,6 +20,7 @@ import utils
 
 os.environ["TORCH_CUDNN_V8_API_ENABLED"] = "1"
 torch.autograd.set_detect_anomaly(True)
+torch.cuda.set_sync_debug_mode("default")
 
 
 def seed_all(seed):
@@ -157,10 +158,10 @@ def train(
     ### To use profiler, open chrome://tracing and load the trace.json file, or view in tensorboard
     # prof = profiler.profile(
     #     activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA],
-    #     schedule=profiler.schedule(skip_first=10, wait=1, warmup=1, active=1, repeat=1),
+    #     schedule=profiler.schedule(skip_first=30, wait=1, warmup=1, active=1, repeat=1),
     #     on_trace_ready=profiler.tensorboard_trace_handler(args.logdir),
     #     record_shapes=False,
-    #     profile_memory=False,
+    #     profile_memory=True,
     #     with_stack=False
     # )
     for epoch in range(start_epoch, train_config.num_epochs + 1):
@@ -168,45 +169,50 @@ def train(
         trainer.on_train_epoch_start()
         # prof.start()
         for batch_idx, batch in tqdm(enumerate(train_dataloader), desc=f"Epoch {epoch}", total=len(train_dataloader)):
-            # prof.step()
+            
             trainer.train_step(batch, global_step, epoch, batch_idx, args.logdir)
+            # prof.step()
+
             if global_step % train_config.log_interval == 0:
                 logdict = trainer.log_step(args.logdir, global_step, epoch, batch_idx)
                 if dist.get_rank() == 0:
                     for key, val in logdict.items():
-                        writer.add_scalar(f"{key}/train", val, global_step)
+                        writer.add_scalar(f"train/{key}", val, global_step)
                 dist.barrier()
+            
+            if global_step % train_config.eval_interval == 0:
+                datasets_results = eval(args, trainer, val_dataloaders, global_step, epoch)
+                msg = f"Rank {dist.get_rank()}: Epoch {epoch}, step {global_step}, validation metrics \n"
+                for key, res in datasets_results.items():
+                    msg += f"Dataset {key}: {res}\n"
+                logging.info(msg)
+                if dist.get_rank() == 0:
+                    for dataset_name, dataset_res in datasets_results.items():
+                        for key, val in dataset_res.items():
+                            writer.add_scalar(f"val/{dataset_name}/{key}", val, global_step)
+            
+                dist.barrier()
+
+            if global_step % train_config.ckpt_interval == 0 and dist.get_rank() == 0:
+                checkpoint = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "model": trainer.get_model_state_dict()
+                }
+                if train_config.save_optimizer_states:
+                    checkpoint["optimizer"] = trainer.get_optimizer_state_dict()
+                    checkpoint["lr_scheduler"] = trainer.get_lr_scheduler_state_dict()
+                    checkpoint["scaler"] = trainer.get_scaler_state_dict()
+                torch.save(checkpoint, os.path.join(args.ckptdir, f"epoch{epoch}_step{global_step}.ckpt"))
+            
+                dist.barrier()
+
             global_step += 1
+        
         logdict = trainer.on_train_epoch_end(epoch)
+
         # prof.stop()
         # break
-        
-        if epoch % train_config.eval_interval == 0:
-            datasets_results = eval(args, trainer, val_dataloaders, global_step, epoch)
-            msg = f"Rank {dist.get_rank()}: Epoch {epoch}, validation metrics \n"
-            for key, res in datasets_results.items():
-                msg += f"Dataset {key}: {res}\n"
-            logging.info(msg)
-            if dist.get_rank() == 0:
-                for dataset_name, dataset_res in datasets_results.items():
-                    for key, val in dataset_res.items():
-                        writer.add_scalar(f"val/{dataset_name}/{key}", val, global_step)
-        
-        dist.barrier()
-        
-        if epoch % train_config.ckpt_interval == 0 and dist.get_rank() == 0:
-            checkpoint = {
-                "epoch": epoch,
-                "global_step": global_step,
-                "model": trainer.get_model_state_dict()
-            }
-            if train_config.save_optimizer_states:
-                checkpoint["optimizer"] = trainer.get_optimizer_state_dict()
-                checkpoint["lr_scheduler"] = trainer.get_lr_scheduler_state_dict()
-                checkpoint["scaler"] = trainer.get_scaler_state_dict()
-            torch.save(checkpoint, os.path.join(args.ckptdir, f"epoch{epoch}_step{global_step}.ckpt"))
-        
-        dist.barrier()
     
     # prof.export_chrome_trace(os.path.join(args.logdir, "trace.json"))
 
