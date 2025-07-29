@@ -205,7 +205,7 @@ def train(
                     checkpoint["scaler"] = trainer.get_scaler_state_dict()
                 torch.save(checkpoint, os.path.join(args.ckptdir, f"epoch{epoch}_step{global_step}.ckpt"))
             
-                dist.barrier()
+            dist.barrier()
 
             global_step += 1
         
