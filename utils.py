@@ -1,5 +1,6 @@
 import functools
 import importlib
+import logging
 import time
 
 
@@ -55,3 +56,22 @@ def simple_time_tracker(func):
         return res
 
     return wrapper
+
+
+def setup_logging(log_file, rank):
+    formatter = logging.Formatter(
+        "%(asctime)s - Rank %(rank)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    if rank == 0:
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+    else:
+        logger.disabled = True
+    return logger
