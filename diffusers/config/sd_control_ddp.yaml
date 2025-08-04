@@ -29,6 +29,7 @@ trainer:
         num_res_blocks: 2
         attn_resolutions: []
         dropout: 0.0
+        scale_factor: 0.18215
         pretrained: diffusers/pretrained/sd-v1-5-pruned-vae.pth
     cond_stage_config:
       target: diffusers.model.text_encoder.CLIPTextEncoder
