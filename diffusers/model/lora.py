@@ -1,3 +1,4 @@
+import itertools
 import lightning
 import math
 import numpy as np
@@ -355,3 +356,96 @@ class PLBase(lightning.LightningModule):
             for i in range(image_np.shape[0]):
                 filename = f'gs-{self.global_step:04}_e-{self.current_epoch:04}_b-{batch_idx:04}-{i:02}_{key}.png'
                 Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))
+
+
+class TrainerDDPO(Trainer):
+    def train_step(self, batch, batch_idx, global_step):
+        batch_size = len(batch["prompts"])
+        height = batch["height"][0]
+        width = batch["width"][0]
+        mini_batch_size = self.mini_batch_size
+        # TODO same prompt on same device? no
+        with torch.no_grad():
+            all_text_embs = list()
+            all_latents = list()
+            all_next_latents = list()
+            all_log_probs = list()
+            all_rewards = list()
+            for i in range(0, batch_size, mini_batch_size):
+                prompts = batch["prompts"][i:i+mini_batch_size]
+                text_embs = self.clip(prompts)
+                neg_prompts = ["" for _ in range(mini_batch_size)]
+                # sample images
+                noise = torch.randn((mini_batch_size, 4, height, width), device=self.device, generator=None)
+                latents, log_probs = self.sampler.sample()
+                images = latents[-1] / self.vae.scale_factor
+                images = self.vae.decode(images)
+                images = (images.clamp(-1, 1) + 1) / 2
+                rewards = self.reward_fn(images, prompts)
+                
+                all_text_embs.append(text_embs)
+                all_latents.append(torch.stack([noise, *latents[:-1]], dim=1))
+                all_next_latents.append(torch.stack(latents, dim=1))
+                all_log_probs.append(log_probs)
+                all_rewards.append(rewards)
+
+            all_text_embs = torch.cat(all_text_embs, dim=0)
+            all_latents = torch.cat(all_latents, dim=0)
+            all_next_latents = torch.cat(all_next_latents, dim=0)
+            all_log_probs = torch.cat(all_log_probs, dim=0)    # (batch_size, num_timesteps)
+            all_rewards = torch.cat(all_rewards, dim=0)    # (batch_size,)
+            all_timesteps = self.sampler.timesteps.repeat(batch_size, 1)
+            
+            # gather all rewards and calculate advantages
+            all_advantages = self.rewards_tracker(batch["prompts"], all_rewards)
+        
+        # training
+        # TODO iterate over sample how many times?
+        perm = torch.randperm(batch_size, device=self.device)
+        all_text_embs = all_text_embs[perm]
+        all_latents = all_latents[perm]
+        all_next_latents = all_next_latents[perm]
+        all_log_probs = all_log_probs[perm]
+        all_advantages = all_advantages[perm]
+        all_timesteps = all_timesteps[perm]
+
+        perm = torch.stack([
+            torch.randperm(self.sampler.num_inference_timesteps, device=self.device)
+            for _ in range(batch_size)
+        ])
+        all_timesteps = all_timesteps[torch.arange(batch_size, device=self.device)[:, None], perm]
+        all_latents = all_latents[torch.arange(batch_size, device=self.device)[:, None], perm]
+        all_next_latents = all_next_latents[torch.arange(batch_size, device=self.device)[:, None], perm]
+        all_log_probs = all_log_probs[torch.arange(batch_size, device=self.device)[:, None], perm]
+
+        for i in range(0, batch_size, mini_batch_size):
+            timesteps = all_timesteps[i:i+mini_batch_size]
+            text_embs = all_text_embs[i:i+mini_batch_size]    # (mini_batch_size, seq, emb)
+            latents = all_latents[i:i+mini_batch_size]    # (mini_batch_size, timesteps, c, h, w)
+            next_latents = all_next_latents[i:i+mini_batch_size]
+            advantages = all_advantages[i:i+mini_batch_size]    # (mini_batch_size,)
+            log_probs_old = all_log_probs[i:i+mini_batch_size]    # (mini_batch_size, num_timesteps)
+            advantages = torch.clamp(advantages, -self.loss_config.adv_clip_max, self.loss_config.adv_clip_max)
+            
+            # TODO grad accumulate
+            # TODO cfg
+            for j in range(self.sampler.num_inference_timesteps):
+                outputs = self.unet(latents[:, j], timesteps[:, j], context=text_embs)
+                log_probs = self.sampler.step(return_log_probs=True)
+                ratio = torch.exp(log_probs - log_probs_old[:, j])
+                unclipped_part = - advantages * ratio
+                clipped_part = - advantages * torch.clamp(ratio, 1 - self.loss_config.ppo_clip, 1 + self.loss_config.ppo_clip)
+                loss_ppo = torch.maximum(unclipped_part, clipped_part)
+                loss_ppo = loss_ppo.mean()
+                loss_ppo.backward()
+                params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
+                nn.utils.clip_grad_norm_(params, max_norm=1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
+                self.lr_scheduler.step()
+
+                approx_kl = 0.5 * torch.mean((log_probs - log_probs_old[:, t]) ** 2)
+                clip_frac = torch.mean((torch.abs(ratio - 1) > self.loss_config.ppo_clip).float())
+                self.loss_meters["approx_kl"].update(approx_kl, mini_batch_size)
+                self.loss_meters["clip_frac"].update(clip_frac, mini_batch_size)
+                self.loss_meters["loss_ppo"].update(loss_ppo, mini_batch_size)
