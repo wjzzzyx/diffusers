@@ -1,17 +1,21 @@
+import collections
 import itertools
 import lightning
 import math
 import numpy as np
 import os
-from PIL import Image
+from PIL import Image, ImageDraw
+import pyiqa
 import re
 import safetensors
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 
 import utils
-from torch_utils import replace_substring_in_state_dict_if_present
+import torch_utils
 from diffusers.model.stable_diffusion_stabilityai import StableDiffusion_StabilityAI
 from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
 
@@ -358,6 +362,162 @@ class PLBase(lightning.LightningModule):
                 Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))
 
 
+class Trainer():
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        self.device = device
+        
+        self.unet = utils.instantiate_from_config(model_config.unet_config).cuda()
+        self.unet.eval()
+        self.unet.requires_grad_(False)
+        self.unet = self.unet.to(memory_format=torch.channels_last)
+        self.vae = utils.instantiate_from_config(model_config.first_stage_config).cuda()
+        self.vae.eval()
+        self.vae.requires_grad_(False)
+        self.vae = self.vae.to(memory_format=torch.channels_last)
+        self.clip = utils.instantiate_from_config(model_config.cond_stage_config).cuda()
+        self.clip.eval()
+        self.clip.requires_grad_(False)
+        lora_model = LoraNetwork(1.0, model_config.lora)
+        self.lora_model = DistributedDataParallel(lora_model, device_ids=[device])
+        self.sampler = utils.instantiate_from_config(model_config.sampler_config)
+
+        # prepare loss
+        self.diffusion_loss_fn = utils.instantiate_from_config(loss_config)
+
+        # prepare optimizer
+        self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
+            self.lora_model.parameters(), **optimizer_config.lr_scheduler_params
+        )
+        optimizer_config.lr_scheduler_params.T_max = optimizer_config.num_training_steps
+        self.lr_scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
+            self.optimizer, **optimizer_config.lr_scheduler_params
+        )
+
+        # prepare metrics
+        self.loss_meters = {
+            "loss_ppo": torch_utils.RunningStatistic(device),
+            "approx_kl": torch_utils.RunningStatistic(device),
+            "clip_frac": torch_utils.RunningStatistic(device),
+        }
+    
+    def on_train_epoch_start(self):
+        self.lora_model.train()
+        for key in self.loss_meters:
+            self.loss_meters[key].reset()
+
+    def train_step(self, batch, batch_idx, global_step):
+        with torch.autocast("cuda", torch.bfloat16):
+            batch_size = batch['image'].shape[0]
+            images = batch['image'].cuda(non_blocking=True)
+            images = images.to(memory_format=torch.channels_last)
+            images = images * 2 - 1
+            latents = self.vae.encode(images).mean
+            latents = latents * self.vae.scale_factor
+            text_emb = self.clip(batch['text'])
+            
+            noise = torch.randn_like(latents)
+            time = torch.randint(0, self.sampler.num_train_timesteps, (batch_size,), device=self.device)
+            alphas_cumprod_t = self.sampler.alphas_cumprod[time][(...,) + (None,) * 3]
+            xt = torch.sqrt(alphas_cumprod_t) * latents + torch.sqrt(1 - alphas_cumprod_t) * noise
+            outputs = self.unet(xt, time, context=text_emb)
+            loss = self.diffusion_loss_fn(outputs, xt, noise, time)
+
+        loss.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.lr_scheduler.step()
+        self.loss_meters["loss_l2"].update(loss, batch_size)
+
+    def on_train_epoch_end(self, epoch):
+        return dict()
+    
+    @torch.no_grad()
+    def log_step(self, logdir, global_step, epoch, batch_idx):
+        logdict = dict()
+        for key in self.loss_meters.keys():
+            val = self.loss_meters[key].compute()
+            logdict[key] = val.item()
+            self.loss_meters[key].reset()
+        logdict["learning_rate"] = self.optimizer.param_groups[0]["lr"]
+        return logdict
+
+    def on_val_epoch_start(self):
+        self.lora_model.eval()
+        self.metrics_dict = collections.defaultdict(list)
+        self.psnr = pyiqa.create_metric('psnr')
+        self.ssim = pyiqa.create_metric('ssim')
+        self.lpips = pyiqa.create_metric('lpips', version='0.1', net='vgg', device=self.device)
+        self.fid = pyiqa.create_metric("fid", device=self.device)
+    
+    @torch.no_grad()
+    @torch.autocast("cuda", torch.bfloat16)
+    def val_step(self, batch, global_step, epoch, batch_idx, logdir):
+        batch_size = len(batch["text"])
+        height, width = batch["height"][0], batch["width"][0]
+        text_emb = self.clip(batch["text"])
+        generator=torch.Generator(self.device)
+        noise = torch.randn((batch_size, 4, height // 8, width // 8), device=self.device, generator=generator)
+        
+        preds = self.sampler.sample(
+            self.denoiser,
+            noise,
+            denoiser_args={"cond_pos_prompt": text_emb},
+            generator=generator
+        )
+        preds = preds / self.vae.scale_factor
+        preds = self.vae.decode(preds)
+        preds = (preds.clamp(-1, 1) + 1) / 2
+        
+        if batch_idx % 100 == 0:
+            dirname = os.path.join(logdir, "log_images", "val")
+            os.makedirs(dirname, exist_ok=True)
+            log_image_dict = {
+                "pred": preds,
+                "text": batch["text"],
+                "fpath": batch["fpath"],
+            }
+            self.log_image(dirname, global_step, epoch, log_image_dict)
+    
+    def on_val_epoch_end(self, dataset_name, dataset, logdir):
+        if dist.get_rank() == 0:
+            self.metrics_dict["fid"] = self.fid(
+                os.path.join(logdir, "val_preds"), os.path.join(dataset.root_dir, "val", "images")
+            )
+        self.fid.cpu()
+        return self.metrics_dict
+
+    def log_image(self, logdir, global_step, epoch, log_image_dict):
+        preds = log_image_dict["pred"].permute(0, 2, 3, 1).cpu().numpy()
+        text = log_image_dict["text"]
+        fpaths = log_image_dict["fpath"]
+        for i in range(len(fpaths)):
+            fname = os.path.basename(fpaths[i])
+            pred_fname = os.path.splitext(fname)[0] + f"_gs{global_step}_e{epoch}_pred.png"
+            pred = Image.fromarray((preds[i] * 255).astype("uint8"))
+            new_pred = Image.new(pred.mode, (pred.width, pred.height + 20), "white")
+            new_pred.paste(pred, (0, 0))
+            ImageDraw.Draw(new_pred).text((10, pred.height), text[i], fill=(0, 0, 0))
+            new_pred.save(os.path.join(logdir, pred_fname))
+
+    def get_model_state_dict(self):
+        return self.lora_model.module.state_dict()
+    
+    def get_optimizer_state_dict(self):
+        return self.optimizer.state_dict()
+    
+    def get_lr_scheduler_state_dict(self):
+        return self.lr_scheduler.state_dict()
+    
+    def load_model_state_dict(self, state_dict):
+        self.lora_model.module.load_state_dict(state_dict)
+    
+    def load_optimizer_state_dict(self, state_dict):
+        self.optimizer.load_state_dict(state_dict)
+    
+    def load_lr_scheduler_state_dict(self, state_dict):
+        self.lr_scheduler.load_state_dict(state_dict)
+
+
 class TrainerDDPO(Trainer):
     def train_step(self, batch, batch_idx, global_step):
         batch_size = len(batch["prompts"])
@@ -431,7 +591,7 @@ class TrainerDDPO(Trainer):
             # TODO cfg
             for j in range(self.sampler.num_inference_timesteps):
                 outputs = self.unet(latents[:, j], timesteps[:, j], context=text_embs)
-                log_probs = self.sampler.step(return_log_probs=True)
+                log_probs = self.sampler.get_log_prob(outputs, timesteps[:, j], next_latents[:, j])
                 ratio = torch.exp(log_probs - log_probs_old[:, j])
                 unclipped_part = - advantages * ratio
                 clipped_part = - advantages * torch.clamp(ratio, 1 - self.loss_config.ppo_clip, 1 + self.loss_config.ppo_clip)
@@ -444,7 +604,7 @@ class TrainerDDPO(Trainer):
                 self.optimizer.zero_grad(set_to_none=True)
                 self.lr_scheduler.step()
 
-                approx_kl = 0.5 * torch.mean((log_probs - log_probs_old[:, t]) ** 2)
+                approx_kl = 0.5 * torch.mean((log_probs - log_probs_old[:, j]) ** 2)
                 clip_frac = torch.mean((torch.abs(ratio - 1) > self.loss_config.ppo_clip).float())
                 self.loss_meters["approx_kl"].update(approx_kl, mini_batch_size)
                 self.loss_meters["clip_frac"].update(clip_frac, mini_batch_size)
