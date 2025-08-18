@@ -18,6 +18,7 @@ import utils
 import torch_utils
 from diffusers.model.stable_diffusion_stabilityai import StableDiffusion_StabilityAI
 from diffusers.sampler.denoiser import KarrasEpsDenoiser, KarrasVDenoiser, KarrasCFGDenoiser
+from diffusers.loss.diffusion_loss import TimeWeightedL2Loss
 
 suffix_conversion = {
     'conv1': 'in_layers_2',
@@ -377,16 +378,23 @@ class Trainer():
         self.clip = utils.instantiate_from_config(model_config.cond_stage_config).cuda()
         self.clip.eval()
         self.clip.requires_grad_(False)
-        lora_model = LoraNetwork(1.0, model_config.lora)
+        lora_model = LoraNetwork(1.0)
+        lora_model.add_lora_modules(
+            model_config.lora.lora_dim, model_config.lora.lora_alpha, self.unet, self.clip,
+            model_config.lora.dropout_module, model_config.lora.dropout, model_config.lora.dropout_rank
+        )
+        lora_model.cuda()
         self.lora_model = DistributedDataParallel(lora_model, device_ids=[device])
         self.sampler = utils.instantiate_from_config(model_config.sampler_config)
 
         # prepare loss
-        self.diffusion_loss_fn = utils.instantiate_from_config(loss_config)
+        # self.diffusion_loss_fn = TimeWeightedL2Loss(
+        #     loss_config.kind, loss_config.prediction_type, alphas_cumprod=self.sampler.alphas_cumprod
+        # )
 
         # prepare optimizer
         self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
-            self.lora_model.parameters(), **optimizer_config.lr_scheduler_params
+            self.lora_model.parameters(), **optimizer_config.optimizer_params
         )
         optimizer_config.lr_scheduler_params.T_max = optimizer_config.num_training_steps
         self.lr_scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
@@ -478,6 +486,12 @@ class Trainer():
             }
             self.log_image(dirname, global_step, epoch, log_image_dict)
     
+    def denoiser(self, xt, time, cond_prompt):
+        alphas_cumprod_t = self.sampler.alphas_cumprod[time][(...,) + (None,) * 3]
+        outputs = self.unet(xt, time, context=cond_prompt)
+        denoised = (xt - torch.sqrt(1 - alphas_cumprod_t) * outputs) / torch.sqrt(alphas_cumprod_t)
+        return denoised
+    
     def on_val_epoch_end(self, dataset_name, dataset, logdir):
         if dist.get_rank() == 0:
             self.metrics_dict["fid"] = self.fid(
@@ -519,25 +533,32 @@ class Trainer():
 
 
 class TrainerDDPO(Trainer):
-    def train_step(self, batch, batch_idx, global_step):
-        batch_size = len(batch["prompts"])
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        super().__init__(model_config, loss_config, optimizer_config, device)
+        self.reward_fn = utils.get_obj_from_str(loss_config.target)
+        self.mini_batch_size = 8
+    
+    def train_step(self, batch, global_step, epoch, batch_idx, logdir):
+        batch_size = len(batch["text"])
         height = batch["height"][0]
         width = batch["width"][0]
         mini_batch_size = self.mini_batch_size
         # TODO same prompt on same device? no
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
             all_text_embs = list()
             all_latents = list()
             all_next_latents = list()
-            all_log_probs = list()
+            all_logprobs = list()
             all_rewards = list()
             for i in range(0, batch_size, mini_batch_size):
-                prompts = batch["prompts"][i:i+mini_batch_size]
+                prompts = batch["text"][i:i+mini_batch_size]
                 text_embs = self.clip(prompts)
                 neg_prompts = ["" for _ in range(mini_batch_size)]
                 # sample images
-                noise = torch.randn((mini_batch_size, 4, height, width), device=self.device, generator=None)
-                latents, log_probs = self.sampler.sample()
+                noise = torch.randn((mini_batch_size, 4, height // 8, width // 8), device=self.device, generator=None)
+                latents, log_probs = self.sampler.sample(
+                    self.denoiser, noise, denoiser_args={"cond_prompt": text_embs}, return_logprob=True
+                )
                 images = latents[-1] / self.vae.scale_factor
                 images = self.vae.decode(images)
                 images = (images.clamp(-1, 1) + 1) / 2
@@ -546,18 +567,18 @@ class TrainerDDPO(Trainer):
                 all_text_embs.append(text_embs)
                 all_latents.append(torch.stack([noise, *latents[:-1]], dim=1))
                 all_next_latents.append(torch.stack(latents, dim=1))
-                all_log_probs.append(log_probs)
+                all_logprobs.append(torch.stack(log_probs, dim=1))
                 all_rewards.append(rewards)
 
-            all_text_embs = torch.cat(all_text_embs, dim=0)
-            all_latents = torch.cat(all_latents, dim=0)
-            all_next_latents = torch.cat(all_next_latents, dim=0)
-            all_log_probs = torch.cat(all_log_probs, dim=0)    # (batch_size, num_timesteps)
+            all_text_embs = torch.cat(all_text_embs, dim=0)    # (batch_size, seq, dim)
+            all_latents = torch.cat(all_latents, dim=0)    # (batch_size, num_timesteps, c, h, w)
+            all_next_latents = torch.cat(all_next_latents, dim=0)    # (batch_size, num_timesteps, c, h, w)
+            all_logprobs = torch.cat(all_logprobs, dim=0)    # (batch_size, num_timesteps)
             all_rewards = torch.cat(all_rewards, dim=0)    # (batch_size,)
             all_timesteps = self.sampler.timesteps.repeat(batch_size, 1)
             
             # gather all rewards and calculate advantages
-            all_advantages = self.rewards_tracker(batch["prompts"], all_rewards)
+            all_advantages = self.rewards_tracker(batch["text"], all_rewards)
         
         # training
         # TODO iterate over sample how many times?
@@ -565,7 +586,7 @@ class TrainerDDPO(Trainer):
         all_text_embs = all_text_embs[perm]
         all_latents = all_latents[perm]
         all_next_latents = all_next_latents[perm]
-        all_log_probs = all_log_probs[perm]
+        all_logprobs = all_logprobs[perm]
         all_advantages = all_advantages[perm]
         all_timesteps = all_timesteps[perm]
 
@@ -576,7 +597,7 @@ class TrainerDDPO(Trainer):
         all_timesteps = all_timesteps[torch.arange(batch_size, device=self.device)[:, None], perm]
         all_latents = all_latents[torch.arange(batch_size, device=self.device)[:, None], perm]
         all_next_latents = all_next_latents[torch.arange(batch_size, device=self.device)[:, None], perm]
-        all_log_probs = all_log_probs[torch.arange(batch_size, device=self.device)[:, None], perm]
+        all_logprobs = all_logprobs[torch.arange(batch_size, device=self.device)[:, None], perm]
 
         for i in range(0, batch_size, mini_batch_size):
             timesteps = all_timesteps[i:i+mini_batch_size]
@@ -584,14 +605,14 @@ class TrainerDDPO(Trainer):
             latents = all_latents[i:i+mini_batch_size]    # (mini_batch_size, timesteps, c, h, w)
             next_latents = all_next_latents[i:i+mini_batch_size]
             advantages = all_advantages[i:i+mini_batch_size]    # (mini_batch_size,)
-            log_probs_old = all_log_probs[i:i+mini_batch_size]    # (mini_batch_size, num_timesteps)
+            log_probs_old = all_logprobs[i:i+mini_batch_size]    # (mini_batch_size, num_timesteps)
             advantages = torch.clamp(advantages, -self.loss_config.adv_clip_max, self.loss_config.adv_clip_max)
             
             # TODO grad accumulate
             # TODO cfg
             for j in range(self.sampler.num_inference_timesteps):
-                outputs = self.unet(latents[:, j], timesteps[:, j], context=text_embs)
-                log_probs = self.sampler.get_log_prob(outputs, timesteps[:, j], next_latents[:, j])
+                denoised = self.denoiser(latents[:, j], timesteps[:, j], cond_prompt=text_embs)
+                _, log_probs = self.sampler.step(denoised, latents[:, j], timesteps[:, j], pred_xtm1=next_latents[:, j], generator=None)
                 ratio = torch.exp(log_probs - log_probs_old[:, j])
                 unclipped_part = - advantages * ratio
                 clipped_part = - advantages * torch.clamp(ratio, 1 - self.loss_config.ppo_clip, 1 + self.loss_config.ppo_clip)

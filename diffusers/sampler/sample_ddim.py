@@ -1,5 +1,5 @@
+import math
 import torch
-from typing import Dict, Sequence
 
 from . import schedule
 
@@ -7,8 +7,8 @@ from . import schedule
 class DDIMSampler():
     def __init__(
         self,
-        num_train_steps: int,
-        num_inference_steps: int,
+        num_train_timesteps: int,
+        num_inference_timesteps: int,
         beta_start: float,
         beta_end: float,
         beta_schedule: str,
@@ -19,52 +19,63 @@ class DDIMSampler():
         Args: 
             eta: hyperparameter used in Equation (16)
         """
-        self.num_train_steps = num_train_steps
-        self.num_inference_steps = num_inference_steps
-        self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_steps)
+        self.num_train_timesteps = num_train_timesteps
+        self.num_inference_timesteps = num_inference_timesteps
+        self.betas = schedule.get_betas(beta_start, beta_end, beta_schedule, num_train_timesteps).cuda()
         self.alphas = 1 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.eta = eta
         self.denoising_strength = denoising_strength
 
-        self.set_timesteps(num_inference_steps)
+        self.set_timesteps(num_inference_timesteps)
     
     def set_timesteps(self, num_inference_steps):
         self.num_inference_steps = num_inference_steps
         # leading spacing
-        self.timesteps = range(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
-        self.timesteps = self.timesteps[::-1]
+        self.timesteps = torch.arange(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
+        self.timesteps = self.timesteps.flip(0)
     
-    def step(self, denoised: torch.Tensor, xt: torch.Tensor, t: int, generator=None):
-        t_next = t - self.num_train_steps // self.num_inference_steps
+    def step(self, denoised: torch.Tensor, xt: torch.Tensor, t: int, pred_xtm1 = None, generator=None):
+        t_next = t - self.num_train_timesteps // self.num_inference_timesteps
         alpha_cumprod_t = self.alphas_cumprod[t]
         alpha_cumprod_t_next = self.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(1.0, device=xt.device)
         sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_next))
         
         pred_x0 = denoised
         pred_z = (xt - torch.sqrt(alpha_cumprod_t) * denoised) / torch.sqrt(1 - alpha_cumprod_t)
-        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+        # pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
-        cur_mean = torch.sqrt(alpha_cumprod_t_next) * pred_x0 + torch.sqrt(1 - alpha_cumprod_t_next - sigma_t ** 2) * pred_z
+        pred_xtm1_mean = torch.sqrt(alpha_cumprod_t_next) * pred_x0 + torch.sqrt(1 - alpha_cumprod_t_next - sigma_t ** 2) * pred_z
 
-        if self.eta > 0 and t > 0:
-            variance = sigma_t * torch.randn(pred_x0.shape, generator=generator)
-        else:
-            variance = 0
-        sample_next = cur_mean + variance
+        if not pred_xtm1:
+            if self.eta > 0 and t > 0:
+                variance = sigma_t * torch.randn(pred_x0.shape, generator=generator)
+            else:
+                variance = 0
+            pred_xtm1 = pred_xtm1_mean + variance
         
-        return sample_next
+        logprob = self.get_logprob(pred_xtm1, pred_xtm1_mean, sigma_t)
+        
+        return pred_xtm1, logprob
+
+    def get_logprob(self, pred, pred_mean, std):
+        logprob = (
+            -((pred.detach() - pred_mean) ** 2) / (2 * std ** 2)
+            - 0.5 * math.log(2 * math.pi)
+            - torch.log(std)
+        )
+        logprob = logprob.mean(dim=[1, 2, 3])
+        return logprob
     
     @torch.no_grad()
     def sample(
         self,
         denoiser,
-        batch_size: int,
-        image_shape: Sequence = None,
+        noise: torch.Tensor,
         image: torch.Tensor = None,
-        noise: torch.Tensor = None,
         denoiser_args: dict = {},
-        generator=None
+        generator=None,
+        return_logprob: bool = False
     ) -> torch.Tensor:
         """
         Args:
@@ -75,29 +86,23 @@ class DDIMSampler():
         start_t = self.timesteps[-num_steps]
         timesteps = self.timesteps[-num_steps:]
 
-        if noise is None:
-            if image is not None:
-                noise = torch.randn((batch_size, *image_shape), generator=generator, device=denoiser.inner_model.device)
-            else:
-                noise = torch.randn(image.shape, generator=generator, device=image.device)
         if image is None:
             x = noise
         else:
             x = torch.sqrt(self.alphas_cumprod[start_t]) * image + torch.sqrt(1 - self.alphas_cumprod[start_t]) * noise
         
+        xts, logprobs = list(), list()
         for t in timesteps:
-            time_t = torch.full((batch_size,), t, dtype=torch.int64, device=x.device)
+            time_t = torch.full((noise.size(0),), t, dtype=torch.int64, device=x.device)
             denoised = denoiser(x, time_t, **denoiser_args)
-            # if model.prediction_type == 'epsilon':
-            #     epsilon = output
-            #     sample = (image - torch.sqrt(1 - self.alphas_cumprod[t]) * output) / torch.sqrt(self.alphas_cumprod[t])
-            # elif model.prediction_type == 'sample':
-            #     sample = output
-            #     epsilon = (image - torch.sqrt(self.alphas_cumprod[t]) * output) / torch.sqrt(1 - self.alphas_cumprod[t])
-            # elif model.prediction_type == 'v_prediction':
-            #     raise NotImplementedError('v_prediction is not implemented for DDPM.')
-            x = self.step(denoised, x, t, generator=generator)
-        return x
+            x, logprob = self.step(denoised, x, t, generator=generator)
+            xts.append(x)
+            logprobs.append(logprob)
+        
+        if return_logprob:
+            return xts, logprobs
+        else:
+            return x
 
 
 class DDIMInverseSampler():
