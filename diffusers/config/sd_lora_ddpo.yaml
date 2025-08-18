@@ -1,0 +1,90 @@
+exp_name: debug
+
+trainer:
+  seed: 42
+  target: diffusers.model.lora.TrainerDDPO
+  model_config:
+    unet_config:
+      target: diffusers.model.stable_diffusion_stabilityai.UNetModel
+      params:
+        image_size: 32 # unused
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [4, 2, 1]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4, 4]
+        num_heads: 8
+        use_spatial_transformer: True
+        transformer_depth: 1
+        context_dim: 768
+        use_checkpoint: False
+        legacy: False
+        pretrained: diffusers/pretrained/sd-v1-5-pruned-unet.pth
+    first_stage_config:
+      target: diffusers.model.vae.AutoEncoderKL
+      params:
+        in_channels: 3
+        base_channels: 128
+        out_channels: 3
+        z_channels: 4
+        ch_mult: [1, 2, 4, 4]
+        num_res_blocks: 2
+        attn_resolutions: []
+        dropout: 0.0
+        scale_factor: 0.18215
+        pretrained: diffusers/pretrained/sd-v1-5-pruned-vae.pth
+    cond_stage_config:
+      target: diffusers.model.text_encoder.CLIPTextEncoder
+      params:
+        version: openai/clip-vit-large-patch14
+        layer: last
+        layer_idx: -1
+    lora:
+      lora_dim: 16
+      lora_alpha: 16
+      dropout_module: 0.0
+      dropout: 0.0
+      dropout_rank: 0.0
+    sampler_config:
+      target: diffusers.sampler.sample_ddim.DDIMSampler
+      params:
+        num_train_timesteps: 1000
+        num_inference_timesteps: 100
+        beta_start: 0.00085
+        beta_end: 0.012
+        beta_schedule: sqrt_linear
+  loss_config:
+    target: diffusers.loss.rewards.jpeg_compressibility
+  optimizer_config:
+    optimizer: torch.optim.AdamW
+    optimizer_params:
+      lr: 0.0003
+      betas: [0.9, 0.999]
+      weight_decay: 1e-4
+    lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+    lr_scheduler_params:
+      T_max: 1000000
+      eta_min: 0.0003
+
+data:
+  batch_size: 256
+  val_batch_size: 8
+  num_workers: 8
+  train:
+    target: diffusers.data.simple_datasets.ImagenetAnimalPrompts
+    params:
+      data_dir:
+      length: 25600    # means 100 sampling and training epochs * 256 samples per epoch
+  val:
+    target: diffusers.data.simple_datasets.ImagenetAnimalPrompts
+    params:
+      data_dir:
+      length: 100
+
+train_config:
+  num_epochs: 1
+  eval_interval: 100
+  ckpt_interval: 10000
+  log_interval: 100
+  save_optimizer_states: False
