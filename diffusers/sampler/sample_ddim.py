@@ -32,13 +32,15 @@ class DDIMSampler():
     def set_timesteps(self, num_inference_steps):
         self.num_inference_steps = num_inference_steps
         # leading spacing
-        self.timesteps = torch.arange(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps)
+        self.timesteps = torch.arange(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps) + 1
         self.timesteps = self.timesteps.flip(0)
     
-    def step(self, denoised: torch.Tensor, xt: torch.Tensor, t: int, pred_xtm1 = None, generator=None):
-        t_next = t - self.num_train_timesteps // self.num_inference_timesteps
+    def step(self, denoised: torch.Tensor, xt: torch.Tensor, t: torch.Tensor, pred_xtm1 = None, generator=None):
+        tm1 = t - self.num_train_timesteps // self.num_inference_timesteps
         alpha_cumprod_t = self.alphas_cumprod[t]
-        alpha_cumprod_t_next = self.alphas_cumprod[t_next] if t_next >= 0 else torch.tensor(1.0, device=xt.device)
+        alpha_cumprod_t_next = torch.where(tm1 >= 0, self.alphas_cumprod[tm1.clamp(min=0)], self.alhpas_cumprod[0])
+        alpha_cumprod_t = alpha_cumprod_t.view(-1, 1, 1, 1)
+        alpha_cumprod_t_next = alpha_cumprod_t_next.view(-1, 1, 1, 1)
         sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_next))
         
         pred_x0 = denoised
@@ -47,11 +49,12 @@ class DDIMSampler():
 
         pred_xtm1_mean = torch.sqrt(alpha_cumprod_t_next) * pred_x0 + torch.sqrt(1 - alpha_cumprod_t_next - sigma_t ** 2) * pred_z
 
-        if not pred_xtm1:
-            if self.eta > 0 and t > 0:
-                variance = sigma_t * torch.randn(pred_x0.shape, generator=generator)
-            else:
-                variance = 0
+        if pred_xtm1 is None:
+            variance = torch.where(
+                (t > 0).view(-1, 1, 1, 1),
+                sigma_t * torch.randn(pred_x0.shape, generator=generator, device=xt.device),
+                torch.tensor(0., device=xt.device)
+            )
             pred_xtm1 = pred_xtm1_mean + variance
         
         logprob = self.get_logprob(pred_xtm1, pred_xtm1_mean, sigma_t)
@@ -95,7 +98,7 @@ class DDIMSampler():
         for t in timesteps:
             time_t = torch.full((noise.size(0),), t, dtype=torch.int64, device=x.device)
             denoised = denoiser(x, time_t, **denoiser_args)
-            x, logprob = self.step(denoised, x, t, generator=generator)
+            x, logprob = self.step(denoised, x, time_t, generator=generator)
             xts.append(x)
             logprobs.append(logprob)
         
