@@ -20,7 +20,7 @@ trainer:
         context_dim: 768
         use_checkpoint: False
         legacy: False
-        pretrained: diffusers/pretrained/sd-v1-5-pruned-unet.pth
+        pretrained: diffusers/pretrained/sd-v1-5-pruned-unet-ema.pth
     first_stage_config:
       target: diffusers.model.vae.AutoEncoderKL
       params:
@@ -41,8 +41,8 @@ trainer:
         layer: last
         layer_idx: -1
     lora:
-      lora_dim: 16
-      lora_alpha: 16
+      lora_rank: 4
+      lora_alpha: 4
       dropout_module: 0.0
       dropout: 0.0
       dropout_rank: 0.0
@@ -54,8 +54,11 @@ trainer:
         beta_start: 0.00085
         beta_end: 0.012
         beta_schedule: sqrt_linear
+        eta: 1.0
   loss_config:
     target: diffusers.loss.rewards.jpeg_compressibility
+    adv_clip_max: 5
+    ppo_clip: 1e-4
   optimizer_config:
     optimizer: torch.optim.AdamW
     optimizer_params:

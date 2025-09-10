@@ -84,29 +84,25 @@ def convert_lora_module_names(state_dict):
 class LoRABase(nn.Module):
     """ replace forward method in the original module """
     def __init__(
-        self, org_module, lora_dim, alpha,
+        self, module, lora_rank, lora_alpha,
         dropout_module=0.0, dropout=0.0, dropout_rank=0.0
     ):
         super().__init__()
-        self.lora_dim = lora_dim
+        self.origin_module = module
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.scale = lora_alpha / lora_rank
         self.dropout_module = dropout_module
         self.dropout = dropout
         self.dropout_rank = dropout_rank
-        self.org_forward = org_module.forward
-        org_module.forward = self.forward
-        self.register_buffer('alpha', torch.tensor(alpha))
-        self.scale = alpha / self.lora_dim
     
     def forward(self, x):
-        org_out = self.org_forward(x)
-
+        orig_out = self.origin_module(x)
         # dropout the whole module
         if self.training:
             if self.dropout_module > 0 and torch.rand(1) < self.dropout_module:
-                return org_out
-
+                return orig_out
         x = self.lora_down(x)
-        
         scale = self.scale
         if self.training:
             if self.dropout > 0:
@@ -115,49 +111,46 @@ class LoRABase(nn.Module):
                 mask = torch.rand((x.size(0), self.lora_dim, *x.shape[2:]), device=x.device) > self.dropout_rank
                 x = x * mask
                 scale = self.scale * (1.0 / (1.0 - self.dropout_rank))
-        
         x = self.lora_up(x)
-        return org_out + scale * x
+        return orig_out + scale * x
 
 
-class LoRAMLP(LoRABase):
+class LoRALinear(LoRABase):
     def __init__(
-        self, org_module, lora_dim, alpha,
+        self, module, lora_rank, lora_alpha,
         dropout_module=0.0, dropout=0.0, dropout_rank=0.0
     ):
-        super().__init__(org_module, lora_dim, alpha, dropout_module, dropout, dropout_rank)
-        self.lora_down = nn.Linear(org_module.in_features, lora_dim, bias=False)
-        self.lora_up = nn.Linear(lora_dim, org_module.out_features, bias=False)
-
+        super().__init__(module, lora_rank, lora_alpha, dropout_module, dropout, dropout_rank)
+        self.lora_down = nn.Linear(module.in_features, lora_rank, bias=False)
+        self.lora_up = nn.Linear(lora_rank, module.out_features, bias=False)
         nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_up.weight)
     
     @torch.no_grad()
     def merge(self, multiplier):
-        self.org_module.weight = (
-            self.org_module.weight + multiplier * self.scale * (self.lora_up.weight @ self.lora_down.weight)
+        self.origin_module.weight = (
+            self.origin_module.weight + multiplier * self.scale * (self.lora_up.weight @ self.lora_down.weight)
         )
 
 
-class LoRAConv(LoRABase):
+class LoRAConv2d(LoRABase):
     def __init__(
-        self, org_module, lora_dim, alpha,
+        self, module, lora_rank, lora_alpha,
         dropout_module=0.0, dropout=0.0, dropout_rank=0.0
     ):
-        super().__init__(org_module, lora_dim, alpha, dropout_module, dropout, dropout_rank)
+        super().__init__(module, lora_rank, lora_alpha, dropout_module, dropout, dropout_rank)
         self.lora_down = nn.Conv2d(
-            org_module.in_channels, lora_dim, org_module.kernel_size,
-            org_module.stride, org_module.padding, bias=False
+            module.in_channels, lora_rank, module.kernel_size,
+            module.stride, module.padding, bias=False
         )
-        self.lora_up = nn.Conv2d(lora_dim, org_module.out_channels, 1, 1, bias=False)
-
+        self.lora_up = nn.Conv2d(lora_rank, module.out_channels, kernel_size=1, bias=False)
         nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_up.weight)
     
     @torch.no_grad()
     def merge(self, multiplier):
-        self.org_module.weight = (
-            self.org_module.weight
+        self.origin_module.weight = (
+            self.origin_module.weight
             + multiplier * self.scale * (
                 self.lora_up.weight.squeeze(3).squeeze(2) @ self.lora_down.weight.squeeze(3).squeeze(2)
             ).unsqueeze(2).unsqueeze(3)
@@ -363,6 +356,28 @@ class PLBase(lightning.LightningModule):
                 Image.fromarray(image_np[i]).save(os.path.join(dirname, filename))
 
 
+def attach_lora_to_sd(model, lora_rank, lora_alpha):
+    lora_model = nn.ModuleDict()
+    for name, module in model.named_modules():
+        if module.__class__.__name__ == "CrossAttention":
+            for sub_name, sub_module in module.named_modules():
+                if not sub_module.__class__.__name__ in ["Linear", "Conv2d"]:
+                    continue
+                full_name = f"{name}.{sub_name}"
+                lora_name = f"lora_unet.{full_name}"
+                lora_name = lora_name.replace(".", "_")
+                if sub_module.__class__.__name__ == "Linear":
+                    lora_module = LoRALinear(sub_module, lora_rank, lora_alpha)
+                elif sub_module.__class__.__name__ == "Conv2d":
+                    lora_module = LoRAConv2d(sub_module, lora_rank, lora_alpha)
+                parent_name = ".".join(full_name.split(".")[:-1])
+                parent = model.get_submodule(parent_name)
+                child_name = full_name.split(".")[-1]
+                setattr(parent, child_name, lora_module)
+                lora_model[lora_name] = lora_module
+    return lora_model
+
+
 class Trainer():
     def __init__(self, model_config, loss_config, optimizer_config, device):
         self.model_config = model_config
@@ -380,13 +395,9 @@ class Trainer():
         self.clip = utils.instantiate_from_config(model_config.cond_stage_config).cuda()
         self.clip.eval()
         self.clip.requires_grad_(False)
-        lora_model = LoraNetwork(1.0)
-        lora_model.add_lora_modules(
-            model_config.lora.lora_dim, model_config.lora.lora_alpha, self.unet, self.clip,
-            model_config.lora.dropout_module, model_config.lora.dropout, model_config.lora.dropout_rank
-        )
-        lora_model.cuda()
-        self.lora_model = DistributedDataParallel(lora_model, device_ids=[device])
+        self.lora_model = attach_lora_to_sd(self.unet, model_config.lora.lora_rank, model_config.lora.lora_alpha)
+        self.lora_model.cuda()
+        self.unet = DistributedDataParallel(self.unet, device_ids=[device])
         self.sampler = utils.instantiate_from_config(model_config.sampler_config)
 
         # prepare loss
