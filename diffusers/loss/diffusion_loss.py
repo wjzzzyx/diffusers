@@ -77,3 +77,24 @@ class DiffusionLoss(nn.Module):
         else:
             raise NotImplementedError()
         return huber_c
+
+
+class TimeWeightedL2Loss(nn.Module):
+    def __init__(self, kind: str, prediction_type: str, alphas_cumprod: torch.Tensor = None):
+        super().__init__()
+        if kind == "min-snr":
+            self.snrs = alphas_cumprod / (1 - alphas_cumprod)
+            self.weights = torch.clamp(5 / self.snrs, max=1)    # note: this is for epsilon prediction
+        else:
+            raise NotImplementedError()
+        self.prediction_type = prediction_type
+    
+    def forward(self, outputs, xt, noises, time):
+        if self.prediction_type == "noise":
+            targets = noises
+        else:
+            raise NotImplementedError()
+        loss = F.mse_loss(outputs, targets, reduction="none").mean([1, 2, 3])
+        loss = self.weights[time] * loss
+        loss = loss.mean()
+        return loss
