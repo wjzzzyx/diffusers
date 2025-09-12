@@ -1,0 +1,23 @@
+exp_name: debug
+
+trainer:
+  seed: 42
+  target: classifiers.model.Trainer
+  model_config:
+    embed_dim: 512
+    image_resolution: 224    # set according to positional_embedding size * vision_patch_size
+    vision_width: 768
+    vision_layers: 12
+    vision_patch_size: 16
+    context_length: 77
+    vocab_size: 49408
+    transformer_width: 512
+    transformer_heads: 8
+    transformer_layers: 12
+  loss_config: null
+  optimizer_config:
+    optimizer: torch.optim.AdamW
+    base_lr: 0.0001
+    lr_scheduler: torch.optim.lr_scheduler.CosineAnnealingLR
+    lr_scheduler_params:
+      T_max: 100000

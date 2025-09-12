@@ -28,9 +28,6 @@ if packaging.version.parse(torch.__version__) < packaging.version.parse("1.7.1")
     warnings.warn("PyTorch version 1.7.1 or higher is recommended")
 
 
-__all__ = ["available_models", "load", "tokenize"]
-
-
 @functools.lru_cache()
 def default_bpe():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "bpe_simple_vocab_16e6.txt.gz")
@@ -520,6 +517,35 @@ class CLIP(nn.Module):
         # shape = [global_batch_size, global_batch_size]
         return logits_per_image, logits_per_text
 
+
+class Trainer():
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        self.model_config = model_config
+        self.loss_config = loss_config
+        self.optimizer_config = optimizer_config
+        self.device = device
+
+        self.visual = VisionTransformer(
+            input_resolution=model_config.image_resolution,
+            patch_size=model_config.vision_patch_size,
+            width=model_config.vision_width,
+            layers=model_config.vision_layers,
+            heads=model_config.vision_heads,
+            output_dim=model_config.embed_dim
+        )
+        self.visual = self.visual.to(memory_format=torch.channels_last)
+    
+        # prepare optimizer
+        self.optimizer = utils.get_obj_from_str(optimizer_config.optimizer)(
+            self.lora_model.parameters(), **optimizer_config.optimizer_params
+        )
+        optimizer_config.lr_scheduler_params.T_max = optimizer_config.num_training_steps
+        self.lr_scheduler = utils.get_obj_from_str(optimizer_config.lr_scheduler)(
+            self.optimizer, **optimizer_config.lr_scheduler_params
+        )
+
+    def predict_step(self, batch, global_step, epoch, batch_idx, logdir):
+        return self.visual(batch["image"].cuda(non_blocking=True))
 
 def convert_weights(model: nn.Module):
     """Convert applicable model parameters to fp16"""
