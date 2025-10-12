@@ -1,4 +1,5 @@
 import collections
+import contextlib
 import itertools
 import lightning
 import math
@@ -7,12 +8,13 @@ import os
 from PIL import Image, ImageDraw
 import pyiqa
 import re
-import safetensors
+import safetensors.torch
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
+from tqdm import tqdm
 
 import utils
 import torch_utils
@@ -123,7 +125,8 @@ class LoRALinear(LoRABase):
         super().__init__(module, lora_rank, lora_alpha, dropout_module, dropout, dropout_rank)
         self.lora_down = nn.Linear(module.in_features, lora_rank, bias=False)
         self.lora_up = nn.Linear(lora_rank, module.out_features, bias=False)
-        nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        # nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        nn.init.normal_(self.lora_down.weight, std=1 / lora_rank)    # this is important
         nn.init.zeros_(self.lora_up.weight)
     
     @torch.no_grad()
@@ -387,11 +390,11 @@ class Trainer():
         self.unet = utils.instantiate_from_config(model_config.unet_config).cuda()
         self.unet.eval()
         self.unet.requires_grad_(False)
-        self.unet = self.unet.to(memory_format=torch.channels_last)
+        # self.unet = self.unet.to(memory_format=torch.channels_last)
         self.vae = utils.instantiate_from_config(model_config.first_stage_config).cuda()
         self.vae.eval()
         self.vae.requires_grad_(False)
-        self.vae = self.vae.to(memory_format=torch.channels_last)
+        # self.vae = self.vae.to(memory_format=torch.channels_last)
         self.clip = utils.instantiate_from_config(model_config.cond_stage_config).cuda()
         self.clip.eval()
         self.clip.requires_grad_(False)
@@ -611,7 +614,8 @@ class TrainerDDPO(Trainer):
             all_next_latents = list()
             all_logprobs = list()
             all_rewards = list()
-            for i in range(0, batch_size, mini_batch_size):
+            all_images = list()
+            for i in tqdm(range(0, batch_size, mini_batch_size), desc="Sampling", disable=dist.get_rank() != 0):
                 prompts = batch["text"][i:i+mini_batch_size]
                 text_embs = self.clip(prompts)
                 neg_prompts = ["" for _ in range(mini_batch_size)]
@@ -630,6 +634,7 @@ class TrainerDDPO(Trainer):
                 all_next_latents.append(torch.stack(latents, dim=1))
                 all_logprobs.append(torch.stack(log_probs, dim=1))
                 all_rewards.append(rewards)
+                all_images.append(images)
 
             all_text_embs = torch.cat(all_text_embs, dim=0)    # (batch_size, seq, dim)
             all_latents = torch.cat(all_latents, dim=0)    # (batch_size, num_timesteps, c, h, w)
@@ -637,6 +642,7 @@ class TrainerDDPO(Trainer):
             all_logprobs = torch.cat(all_logprobs, dim=0)    # (batch_size, num_timesteps)
             all_rewards = torch.cat(all_rewards, dim=0)    # (batch_size,)
             all_timesteps = self.sampler.timesteps.cuda().repeat(batch_size, 1)
+            all_images = torch.cat(all_images, dim=0)
             
             # gather all rewards and calculate advantages
             all_advantages = self.rewards_tracker(batch["text"], all_rewards)
@@ -674,8 +680,10 @@ class TrainerDDPO(Trainer):
         all_next_latents = all_next_latents[torch.arange(batch_size, device=self.device)[:, None], perm]
         all_logprobs = all_logprobs[torch.arange(batch_size, device=self.device)[:, None], perm]
 
+        mini_batch_size = 4
+        grad_acc = 2
         self.unet.train()
-        for i in range(0, batch_size, mini_batch_size):
+        for i in tqdm(range(0, batch_size, mini_batch_size), desc="Training", disable=dist.get_rank() != 0):
             timesteps = all_timesteps[i:i+mini_batch_size]
             text_embs = all_text_embs[i:i+mini_batch_size]    # (mini_batch_size, seq, emb)
             latents = all_latents[i:i+mini_batch_size]    # (mini_batch_size, timesteps, c, h, w)
@@ -686,21 +694,28 @@ class TrainerDDPO(Trainer):
             
             # TODO grad accumulate
             # TODO cfg
-            for j in range(self.sampler.num_inference_timesteps):
-                with torch.autocast("cuda", torch.bfloat16):
-                    denoised = self.denoiser(latents[:, j], timesteps[:, j], cond_prompt=text_embs)
-                _, log_probs = self.sampler.step(denoised, latents[:, j], timesteps[:, j], pred_xtm1=next_latents[:, j], generator=None)
-                ratio = torch.exp(log_probs - log_probs_old[:, j])
-                unclipped_part = - advantages * ratio
-                clipped_part = - advantages * torch.clamp(ratio, 1 - self.loss_config.ppo_clip, 1 + self.loss_config.ppo_clip)
-                loss_ppo = torch.maximum(unclipped_part, clipped_part)
-                loss_ppo = loss_ppo.mean()
-                loss_ppo.backward()
-                params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
-                nn.utils.clip_grad_norm_(params, max_norm=1.0)
-                self.optimizer.step()
-                self.optimizer.zero_grad(set_to_none=True)
-                self.lr_scheduler.step()
+            for j in tqdm(range(self.sampler.num_inference_timesteps), disable=dist.get_rank() != 0):
+                should_sync = (i // mini_batch_size + 1) % grad_acc == 0 and j == self.sampler.num_inference_timesteps - 1
+                if should_sync:
+                    context = contextlib.nullcontext()
+                else:
+                    context = self.unet.no_sync() 
+                with context:
+                    with torch.autocast("cuda", torch.bfloat16):
+                        denoised = self.denoiser(latents[:, j], timesteps[:, j], cond_prompt=text_embs)
+                    _, log_probs = self.sampler.step(denoised, latents[:, j], timesteps[:, j], pred_xtm1=next_latents[:, j], generator=None)
+                    ratio = torch.exp(log_probs - log_probs_old[:, j])
+                    unclipped_part = - advantages * ratio
+                    clipped_part = - advantages * torch.clamp(ratio, 1 - self.loss_config.ppo_clip, 1 + self.loss_config.ppo_clip)
+                    loss_ppo = torch.maximum(unclipped_part, clipped_part)
+                    loss_ppo = loss_ppo.mean()
+                    loss_ppo.backward()
+                if shuold_sync:
+                    params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
+                    nn.utils.clip_grad_norm_(params, max_norm=1.0)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.lr_scheduler.step()
 
                 approx_kl = 0.5 * torch.mean((log_probs - log_probs_old[:, j]) ** 2)
                 clip_frac = torch.mean((torch.abs(ratio - 1) > self.loss_config.ppo_clip).float())
