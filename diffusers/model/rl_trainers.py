@@ -223,3 +223,96 @@ class TrainerDDPO(Trainer):
             draw.text(text_position, caption, fill=(0, 0, 0))
             new_pil.save(os.path.join(logdir, f"gs{global_step}_{i}.png"))
 
+
+class TrainerAlignProp(Trainer):
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        super().__init__(model_config, loss_config, optimizer_config, device)
+        self.reward_fn = utils.get_obj_from_str(loss_config.target)
+
+        self.loss_meters = {
+            "loss": torch_utils.RunningStatistic(device),
+            "reward": torch_utils.RunningStatistic(device),
+            "reward_std": torch_utils.RunningStatistic(device),
+        }
+    
+    def train_step(self, batch, global_step, epoch, batch_idx, logdir):
+        batch_size = len(batch["text"])
+        height = batch["height"][0]
+        width = batch["width"][0]
+        grad_acc = 4
+        mini_batch_size = batch_size // grad_acc
+        for i in range(grad_acc):
+            prompts = batch["text"][i:i+mini_batch_size]
+            text_embs = self.clip(prompts)
+            noise = torch.randn((mini_batch_size, 4, height // 8, width // 8), device=self.device, generator=None)
+            latents, logprobs = self.sample_with_grad(noise, text_embs, self.model_config.backprop_strategy, self.model_config.backprop_kwargs)
+            images = latents[-1] / self.vae.scale_factor
+            images = self.vae.decode(images)
+            images = (images.clamp(-1, 1) + 1) / 2
+            loss, rewards = self.reward_fn(images, prompts)
+
+            # world_size = dist.get_world_size()
+            # gathered_rewards = [torch.zeros_like(rewards) for _ in range(world_size)]
+            # dist.all_gather(gathered_rewards, rewards)
+            # rewards = torch.cat(gathered_rewards)
+
+            loss = loss.mean()
+            loss = loss * self.loss_config.loss_coeff
+            loss.backward()
+
+            self.loss_meters["loss"].update(loss, mini_batch_size)
+            self.loss_meters["reward"].update(rewards.mean(), mini_batch_size)
+            self.loss_meters["reward_std"].update(rewards.std(), mini_batch_size)
+
+            if global_step % 1 == 0 and dist.get_rank() == 0:
+                dirname = os.path.join(logdir, "log_images", "train")
+                os.makedirs(dirname, exist_ok=True)
+                log_image_dict = {
+                    "samples": images,
+                    "texts": prompts,
+                    "fpath": batch["fpath"][i:i+mini_batch_size],
+                    "rewards": rewards,
+                }
+                self.log_image(dirname, global_step, epoch, log_image_dict)
+        
+        params = itertools.chain(*[x["params"] for x in self.optimizer.param_groups])
+        nn.utils.clip_grad_norm_(params, max_norm=1.0)
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.lr_scheduler.step()
+    
+    def sample_with_grad(self, noise, text_embs, backprop_strategy=None, backprop_kwargs=None):
+        # randomly sample a timestep to backpropagate to
+        backprop_timestep = -1
+        while backprop_timestep >= self.sampler.num_inference_timesteps or backprop_timestep < 1:    
+            if backprop_strategy == 'gaussian':
+                backprop_timestep = int(torch.distributions.Normal(backprop_kwargs['mean'], backprop_kwargs['std']).sample().item())
+            elif backprop_strategy == 'uniform':
+                backprop_timestep = int(torch.randint(backprop_kwargs['min'], backprop_kwargs['max'], (1,)).item())
+            elif backprop_strategy == 'fixed':
+                backprop_timestep = int(backprop_kwargs['value'])
+        
+        xts, logprobs = list(), list()
+        for j, t in enumerate(self.sampler.timesteps):
+            time_t = torch.full((xt.size(0),), t, dtype=torch.int64, device=noise.device)
+            with torch.enable_grad(False if j < backprop_timestep else True):
+                denoised = self.denoiser(xt, time_t, text_embs)
+                xt, logprob = self.sampler.step(denoised, xt, time_t, generator=None)
+            xts.append(xt)
+            logprobs.append(logprob)
+        return xts, logprobs
+
+
+    def log_image(self, logdir, global_step, epoch, log_image_dict):
+        images = (log_image_dict["samples"].permute(0, 2, 3, 1) * 255).type(torch.uint8).cpu().numpy()
+        prompts = log_image_dict["prompts"]
+        rewards = log_image_dict["rewards"]
+        for i, (image, prompt, reward) in enumerate(zip(images, prompts, rewards)):
+            pil = Image.fromarray(image)
+            new_pil = Image.new(pil.mode, (512, 512 + 20), "white")
+            new_pil.paste(pil, (0, 0))
+            draw = ImageDraw.Draw(new_pil)
+            text_position = (10, pil.height)  # 10 pixels padding from bottom of original image
+            caption = f"{prompt:.50} | {reward:.2f}"
+            draw.text(text_position, caption, fill=(0, 0, 0))
+            new_pil.save(os.path.join(logdir, f"gs{global_step}_{i}.png"))
