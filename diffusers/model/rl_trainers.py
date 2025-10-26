@@ -60,8 +60,7 @@ class TrainerDDPO(Trainer):
     def __init__(self, model_config, loss_config, optimizer_config, device):
         super().__init__(model_config, loss_config, optimizer_config, device)
         self.reward_fn = utils.get_obj_from_str(loss_config.target)
-        self.rewards_tracker = PerPromptStatTracker(16, 16)
-        self.mini_batch_size = 8
+        self.rewards_tracker = PerPromptStatTracker(model_config.buffer_size, model_config.buffer_min_count)
 
         self.loss_meters = {
             "loss_ppo": torch_utils.RunningStatistic(device),
@@ -75,7 +74,7 @@ class TrainerDDPO(Trainer):
         batch_size = len(batch["text"])
         height = batch["height"][0]
         width = batch["width"][0]
-        mini_batch_size = self.mini_batch_size
+        mini_batch_size = 8
         # TODO same prompt on same device? no
         self.unet.eval()
         with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
@@ -150,8 +149,8 @@ class TrainerDDPO(Trainer):
         all_next_latents = all_next_latents[torch.arange(batch_size, device=self.device)[:, None], perm]
         all_logprobs = all_logprobs[torch.arange(batch_size, device=self.device)[:, None], perm]
 
-        mini_batch_size = 4
-        grad_acc = 2
+        mini_batch_size = self.model_config.mini_batch_size
+        grad_acc = self.model_config.grad_acc
         self.unet.train()
         for i in tqdm(range(0, batch_size, mini_batch_size), desc="Training", disable=dist.get_rank() != 0):
             timesteps = all_timesteps[i:i+mini_batch_size]

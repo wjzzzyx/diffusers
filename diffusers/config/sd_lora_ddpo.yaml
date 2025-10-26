@@ -4,6 +4,10 @@ trainer:
   seed: 42
   target: diffusers.model.lora.TrainerDDPO
   model_config:
+    buffer_size: 16
+    buffer_min_count: 16
+    mini_batch_size: 4
+    grad_acc: 2    # 32 / (4 * 2) = 4 optimizations per sampled batch. For hard problem, increase grad_acc
     unet_config:
       target: diffusers.model.stable_diffusion_stabilityai.UNetModel
       params:
