@@ -6,7 +6,7 @@ import math
 import numpy as np
 from packaging import version
 from PIL import Image
-import safetensors
+import safetensors.torch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1116,7 +1116,7 @@ class UNetModel(nn.Module):
             if pretrained.endswith('safetensors'):
                 checkpoint = safetensors.torch.load_file(pretrained, device='cpu')
             else:
-                checkpoint = torch.load(pretrained, map_location='cpu')
+                checkpoint = torch.load(pretrained, map_location='cpu', weights_only=True)
             state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
             missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=True)
 
@@ -1152,13 +1152,14 @@ class UNetModel(nn.Module):
         ), "must specify y if and only if the model is class-conditional"
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        t_emb = t_emb.to(dtype=x.dtype)
         emb = self.time_embed(t_emb)
 
         if self.num_classes is not None:
             assert y.shape[0] == x.shape[0]
             emb = emb + self.label_emb(y)
 
-        h = x.type(self.dtype)
+        h = x
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
@@ -1166,7 +1167,6 @@ class UNetModel(nn.Module):
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
-        h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)
         else:
