@@ -52,7 +52,11 @@ def simple_time_tracker(func):
             res = func(*args, **kwargs)
         finally:
             duration = time.time() - start_time
-        print(f'Simple time tracker: Function {func.__name__} runs for {duration} seconds.')
+        if args and hasattr(args[0], "__class__"):
+            class_name = args[0].__class__.__name__
+            print(f'Simple time tracker: {class_name}.{func.__name__} runs for {duration} seconds.')
+        else:
+            print(f'Simple time tracker: Function {func.__name__} runs for {duration} seconds.')
         return res
 
     return wrapper
