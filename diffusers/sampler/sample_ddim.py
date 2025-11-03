@@ -32,13 +32,13 @@ class DDIMSampler():
     def set_timesteps(self, num_inference_steps):
         self.num_inference_steps = num_inference_steps
         # leading spacing
-        self.timesteps = torch.arange(0, self.num_train_steps, self.num_train_steps // self.num_inference_steps) + 1
+        self.timesteps = torch.arange(0, self.num_train_timesteps, self.num_train_timesteps // self.num_inference_steps) + 1
         self.timesteps = self.timesteps.flip(0)
     
     def step(self, denoised: torch.Tensor, xt: torch.Tensor, t: torch.Tensor, pred_xtm1 = None, generator=None):
         tm1 = t - self.num_train_timesteps // self.num_inference_timesteps
         alpha_cumprod_t = self.alphas_cumprod[t]
-        alpha_cumprod_t_next = torch.where(tm1 >= 0, self.alphas_cumprod[tm1.clamp(min=0)], self.alhpas_cumprod[0])
+        alpha_cumprod_t_next = torch.where(tm1 >= 0, self.alphas_cumprod[tm1.clamp(min=0)], self.alphas_cumprod[0])
         alpha_cumprod_t = alpha_cumprod_t.view(-1, 1, 1, 1)
         alpha_cumprod_t_next = alpha_cumprod_t_next.view(-1, 1, 1, 1)
         sigma_t = self.eta * torch.sqrt((1 - alpha_cumprod_t_next) / (1 - alpha_cumprod_t) * (1 - alpha_cumprod_t / alpha_cumprod_t_next))
@@ -63,7 +63,7 @@ class DDIMSampler():
 
     def get_logprob(self, pred, pred_mean, std):
         logprob = (
-            -((pred.detach() - pred_mean) ** 2) / (2 * std ** 2)
+            -((pred.detach() - pred_mean) ** 2) / (2 * (std ** 2))
             - 0.5 * math.log(2 * math.pi)
             - torch.log(std)
         )
