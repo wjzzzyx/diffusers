@@ -45,27 +45,45 @@ class AestheticScorer(nn.Module):
     def __init__(self, path="sac+logos+ava1-l14-linearMSE.pth"):
         super().__init__()
         self.clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
-        self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.mlp = MLP()
-        state_dict = torch.load(path)
+        state_dict = torch.load(path, weights_only=True)
         self.mlp.load_state_dict(state_dict)
         self.eval()
 
     def __call__(self, images):
-        device = next(self.parameters()).device
-        inputs = self.processor(images=images, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        embed = self.clip.get_image_features(**inputs)
+        embed = self.clip.get_image_features(images)
         embed = embed / torch.linalg.vector_norm(embed, dim=-1, keepdim=True)
         return self.mlp(embed).squeeze(1)
 
 
 def aesthetic_score():
+    processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
     scorer = AestheticScorer().cuda()
 
     def _fn(images: torch.Tensor, prompts):
         images = (images * 255).round().clamp(0, 255).to(torch.uint8)
-        return scorer(images)
+        device = next(scorer.parameters()).device
+        inputs = processor(images=images, return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        return scorer(inputs["pixel_values"])
+    
+    return _fn
+
+
+def aesthetic_loss_fn():
+    target_size = 224
+    normalize = torchvision.transforms.Normalize(
+        mean=[0.48145466, 0.4578275, 0.40821073],
+        std=[0.26862954, 0.26130258, 0.27577711],
+    )
+    scorer = AestheticScorer().cuda()
+    scorer.requires_grad_(False)
+
+    def _fn(images, prompts):
+        images = torchvision.transforms.Resize(target_size)(images)
+        images = normalize(images)
+        rewards = scorer(images)
+        return rewards
     
     return _fn
 

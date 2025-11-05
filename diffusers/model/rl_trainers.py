@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from torch.utils.checkpoint import checkpoint
 from tqdm import tqdm
 
 import torch_utils
@@ -238,17 +239,17 @@ class TrainerAlignProp(Trainer):
         batch_size = len(batch["text"])
         height = batch["height"][0]
         width = batch["width"][0]
-        grad_acc = 4
-        mini_batch_size = batch_size // grad_acc
-        for i in range(grad_acc):
+        mini_batch_size = 4
+        for i in range(0, batch_size, mini_batch_size):
             prompts = batch["text"][i:i+mini_batch_size]
             text_embs = self.clip(prompts)
             noise = torch.randn((mini_batch_size, 4, height // 8, width // 8), device=self.device, generator=None)
-            latents, logprobs = self.sample_with_grad(noise, text_embs, self.model_config.backprop_strategy, self.model_config.backprop_kwargs)
+            latents, logprobs = self.sample_with_grad(noise, text_embs, self.model_config.backprop_strategy, self.model_config.backprop_kwargs[self.model_config.backprop_strategy])
             images = latents[-1] / self.vae.scale_factor
             images = self.vae.decode(images)
             images = (images.clamp(-1, 1) + 1) / 2
-            loss, rewards = self.reward_fn(images, prompts)
+            rewards = self.reward_fn(images, prompts)
+            loss = abs(rewards - self.loss_config.aesthetic_target)
 
             # world_size = dist.get_world_size()
             # gathered_rewards = [torch.zeros_like(rewards) for _ in range(world_size)]
@@ -292,19 +293,21 @@ class TrainerAlignProp(Trainer):
                 backprop_timestep = int(backprop_kwargs['value'])
         
         xts, logprobs = list(), list()
+        xt = noise
         for j, t in enumerate(self.sampler.timesteps):
             time_t = torch.full((xt.size(0),), t, dtype=torch.int64, device=noise.device)
-            with torch.enable_grad(False if j < backprop_timestep else True):
-                denoised = self.denoiser(xt, time_t, text_embs)
+            with torch.set_grad_enabled(False if j < backprop_timestep else True):
+                alphas_cumprod_t = self.sampler.alphas_cumprod[time_t][(...,) + (None,) * 3]
+                outputs = checkpoint(self.unet, xt, time_t, context=text_embs, use_reentrant=False)
+                denoised = (xt - torch.sqrt(1 - alphas_cumprod_t) * outputs) / torch.sqrt(alphas_cumprod_t)
                 xt, logprob = self.sampler.step(denoised, xt, time_t, generator=None)
             xts.append(xt)
             logprobs.append(logprob)
         return xts, logprobs
 
-
     def log_image(self, logdir, global_step, epoch, log_image_dict):
         images = (log_image_dict["samples"].permute(0, 2, 3, 1) * 255).type(torch.uint8).cpu().numpy()
-        prompts = log_image_dict["prompts"]
+        prompts = log_image_dict["texts"]
         rewards = log_image_dict["rewards"]
         for i, (image, prompt, reward) in enumerate(zip(images, prompts, rewards)):
             pil = Image.fromarray(image)
