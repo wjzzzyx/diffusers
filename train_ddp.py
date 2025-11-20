@@ -96,7 +96,7 @@ def main(args):
     logging.info("Project config" + "\n" + OmegaConf.to_yaml(config))
     logging.info(f"Using distributed training with {world_size} GPU(s).")
 
-    seed_all(config.trainer.seed)    # ensure same weight initialization
+    seed_all(config.trainer.seed + rank)
 
     train_dataset = utils.instantiate_from_config(config.data.train)
     train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=False)
