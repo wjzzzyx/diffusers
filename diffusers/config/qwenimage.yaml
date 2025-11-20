@@ -1,0 +1,14 @@
+trainer:
+  seed: 42
+  target: diffusers.model.qwenimage.Trainer
+  model_config:
+    transformer:
+      patch_size: 2
+      in_channels: 64
+      out_channels: 16
+      num_layers: 60
+      attention_head_dim: 128
+      num_attention_heads: 24
+      joint_attention_dim: 3584
+      axes_dims_rope: [16, 56, 56]
+      guidance_embeds: False
