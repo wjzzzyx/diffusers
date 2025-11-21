@@ -450,16 +450,28 @@ class QwenDoubleStreamAttnProcessor2_0:
         joint_value = torch.cat([txt_value, img_value], dim=1)
 
         # Compute joint attention
-        joint_hidden_states = dispatch_attention_fn(
-            joint_query,
-            joint_key,
-            joint_value,
+        # joint_hidden_states = dispatch_attention_fn(
+        #     joint_query,
+        #     joint_key,
+        #     joint_value,
+        #     attn_mask=attention_mask,
+        #     dropout_p=0.0,
+        #     is_causal=False,
+        #     backend=self._attention_backend,
+        #     parallel_config=self._parallel_config,
+        # )
+        joint_query, joint_key, joint_value = (x.permute(0, 2, 1, 3) for x in (joint_query, joint_key, joint_value))
+        joint_hidden_states = F.scaled_dot_product_attention(
+            query=joint_query,
+            key=joint_key,
+            value=joint_value,
             attn_mask=attention_mask,
             dropout_p=0.0,
             is_causal=False,
-            backend=self._attention_backend,
-            parallel_config=self._parallel_config,
+            scale=None,
+            enable_gqa=False
         )
+        joint_hidden_states = joint_hidden_states.permute(0, 2, 1, 3)
 
         # Reshape back
         joint_hidden_states = joint_hidden_states.flatten(2, 3)
