@@ -446,7 +446,6 @@ class Attention(nn.Module):
         out_bias: bool = True,
         scale_qk: bool = True,
         eps: float = 1e-5,
-        processor: Optional["AttnProcessor"] = None,
         out_dim: int = None,
         out_context_dim: int = None,
         context_pre_only=None,
@@ -505,15 +504,14 @@ class Attention(nn.Module):
             raise ValueError(
                 f"unknown qk_norm: {qk_norm}. Should be one of `None,'layer_norm','fp32_layer_norm','rms_norm'`"
             )
-        
-        self.processor = processor
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        **cross_attention_kwargs,
+        encoder_hidden_states_mask = None,
+        image_rotary_emb = None,
     ) -> torch.Tensor:
         r"""
         The forward method of the `Attention` class.
@@ -531,28 +529,94 @@ class Attention(nn.Module):
         Returns:
             `torch.Tensor`: The output of the attention layer.
         """
-        # The `Attention` class can call different attention processors / attention functions
-        # here we simply pass along all tensors to the selected processor class
-        # For standard processors that are defined here, `**cross_attention_kwargs` is empty
+        if encoder_hidden_states is None:
+            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
 
-        attn_parameters = set(inspect.signature(self.processor.__call__).parameters.keys())
-        quiet_attn_parameters = {"ip_adapter_masks", "ip_hidden_states"}
-        unused_kwargs = [
-            k for k, _ in cross_attention_kwargs.items() if k not in attn_parameters and k not in quiet_attn_parameters
-        ]
-        if len(unused_kwargs) > 0:
-            logger.warning(
-                f"cross_attention_kwargs {unused_kwargs} are not expected by {self.processor.__class__.__name__} and will be ignored."
-            )
-        cross_attention_kwargs = {k: w for k, w in cross_attention_kwargs.items() if k in attn_parameters}
+        seq_txt = encoder_hidden_states.shape[1]
 
-        return self.processor(
-            self,
-            hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            attention_mask=attention_mask,
-            **cross_attention_kwargs,
+        # Compute QKV for image stream (sample projections)
+        img_query = self.to_q(hidden_states)
+        img_key = self.to_k(hidden_states)
+        img_value = self.to_v(hidden_states)
+
+        # Compute QKV for text stream (context projections)
+        txt_query = self.add_q_proj(encoder_hidden_states)
+        txt_key = self.add_k_proj(encoder_hidden_states)
+        txt_value = self.add_v_proj(encoder_hidden_states)
+
+        # Reshape for multi-head attention
+        img_query = img_query.unflatten(-1, (self.heads, -1))
+        img_key = img_key.unflatten(-1, (self.heads, -1))
+        img_value = img_value.unflatten(-1, (self.heads, -1))
+
+        txt_query = txt_query.unflatten(-1, (self.heads, -1))
+        txt_key = txt_key.unflatten(-1, (self.heads, -1))
+        txt_value = txt_value.unflatten(-1, (self.heads, -1))
+
+        # Apply QK normalization
+        if self.norm_q is not None:
+            img_query = self.norm_q(img_query)
+        if self.norm_k is not None:
+            img_key = self.norm_k(img_key)
+        if self.norm_added_q is not None:
+            txt_query = self.norm_added_q(txt_query)
+        if self.norm_added_k is not None:
+            txt_key = self.norm_added_k(txt_key)
+
+        # Apply RoPE
+        if image_rotary_emb is not None:
+            img_freqs, txt_freqs = image_rotary_emb
+            img_query = apply_rotary_emb_qwen(img_query, img_freqs, use_real=False)
+            img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
+            txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
+            txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+
+        # Concatenate for joint attention
+        # Order: [text, image]
+        joint_query = torch.cat([txt_query, img_query], dim=1)
+        joint_key = torch.cat([txt_key, img_key], dim=1)
+        joint_value = torch.cat([txt_value, img_value], dim=1)
+
+        # Compute joint attention
+        # joint_hidden_states = dispatch_attention_fn(
+        #     joint_query,
+        #     joint_key,
+        #     joint_value,
+        #     attn_mask=attention_mask,
+        #     dropout_p=0.0,
+        #     is_causal=False,
+        #     backend=self._attention_backend,
+        #     parallel_config=self._parallel_config,
+        # )
+        joint_query, joint_key, joint_value = (x.permute(0, 2, 1, 3) for x in (joint_query, joint_key, joint_value))
+        joint_hidden_states = F.scaled_dot_product_attention(
+            query=joint_query,
+            key=joint_key,
+            value=joint_value,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=None,
+            enable_gqa=False
         )
+        joint_hidden_states = joint_hidden_states.permute(0, 2, 1, 3)
+
+        # Reshape back
+        joint_hidden_states = joint_hidden_states.flatten(2, 3)
+        joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
+
+        # Split attention outputs back
+        txt_attn_output = joint_hidden_states[:, :seq_txt, :]  # Text part
+        img_attn_output = joint_hidden_states[:, seq_txt:, :]  # Image part
+
+        # Apply output projections
+        img_attn_output = self.to_out[0](img_attn_output)
+        if len(self.to_out) > 1:
+            img_attn_output = self.to_out[1](img_attn_output)  # dropout
+
+        txt_attn_output = self.to_add_out(txt_attn_output)
+
+        return img_attn_output, txt_attn_output
 
 
 class QwenDoubleStreamAttnProcessor2_0:
@@ -864,7 +928,6 @@ class QwenImageTransformerBlock(nn.Module):
             out_dim=dim,
             context_pre_only=False,
             bias=True,
-            processor=QwenDoubleStreamAttnProcessor2_0(),
             qk_norm=qk_norm,
             eps=eps,
         )
