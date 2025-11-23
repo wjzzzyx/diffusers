@@ -8,9 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# from diffusers.models.attention_processor import Attention
-from diffusers.models.attention_dispatch import dispatch_attention_fn
-
 
 class QwenEmbedRope(nn.Module):
     def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
@@ -238,94 +235,36 @@ class Timesteps(nn.Module):
         return t_emb
 
 
-ACT2CLS = {
-    "swish": nn.SiLU,
-    "silu": nn.SiLU,
-    "mish": nn.Mish,
-    "gelu": nn.GELU,
-    "relu": nn.ReLU,
-}
-
-
-def get_activation(act_fn: str) -> nn.Module:
-    """Helper function to get activation function from string.
-
-    Args:
-        act_fn (str): Name of activation function.
-
-    Returns:
-        nn.Module: Activation function.
-    """
-
-    act_fn = act_fn.lower()
-    if act_fn in ACT2CLS:
-        return ACT2CLS[act_fn]()
-    else:
-        raise ValueError(f"activation function {act_fn} not found in ACT2FN mapping {list(ACT2CLS.keys())}")
-
-
 class TimestepEmbedding(nn.Module):
     def __init__(
         self,
         in_channels: int,
         time_embed_dim: int,
-        act_fn: str = "silu",
-        out_dim: int = None,
-        post_act_fn: Optional[str] = None,
-        cond_proj_dim=None,
         sample_proj_bias=True,
     ):
         super().__init__()
-
         self.linear_1 = nn.Linear(in_channels, time_embed_dim, sample_proj_bias)
-
-        if cond_proj_dim is not None:
-            self.cond_proj = nn.Linear(cond_proj_dim, in_channels, bias=False)
-        else:
-            self.cond_proj = None
-
-        self.act = get_activation(act_fn)
-
-        if out_dim is not None:
-            time_embed_dim_out = out_dim
-        else:
-            time_embed_dim_out = time_embed_dim
+        self.act = nn.SiLU()
+        time_embed_dim_out = time_embed_dim
         self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim_out, sample_proj_bias)
 
-        if post_act_fn is None:
-            self.post_act = None
-        else:
-            self.post_act = get_activation(post_act_fn)
-
-    def forward(self, sample, condition=None):
-        if condition is not None:
-            sample = sample + self.cond_proj(condition)
+    def forward(self, sample):
         sample = self.linear_1(sample)
-
-        if self.act is not None:
-            sample = self.act(sample)
-
+        sample = self.act(sample)
         sample = self.linear_2(sample)
-
-        if self.post_act is not None:
-            sample = self.post_act(sample)
         return sample
 
 
 class QwenTimestepProjEmbeddings(nn.Module):
     def __init__(self, embedding_dim):
         super().__init__()
-
         self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0, scale=1000)
         self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
 
     def forward(self, timestep, hidden_states):
         timesteps_proj = self.time_proj(timestep)
         timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=hidden_states.dtype))  # (N, D)
-
-        conditioning = timesteps_emb
-
-        return conditioning
+        return timesteps_emb
 
 
 class RMSNorm(nn.Module):
@@ -576,16 +515,6 @@ class Attention(nn.Module):
         joint_value = torch.cat([txt_value, img_value], dim=1)
 
         # Compute joint attention
-        # joint_hidden_states = dispatch_attention_fn(
-        #     joint_query,
-        #     joint_key,
-        #     joint_value,
-        #     attn_mask=attention_mask,
-        #     dropout_p=0.0,
-        #     is_causal=False,
-        #     backend=self._attention_backend,
-        #     parallel_config=self._parallel_config,
-        # )
         joint_query, joint_key, joint_value = (x.permute(0, 2, 1, 3) for x in (joint_query, joint_key, joint_value))
         joint_hidden_states = F.scaled_dot_product_attention(
             query=joint_query,
@@ -642,87 +571,6 @@ class GELU(nn.Module):
         return hidden_states
 
 
-class GEGLU(nn.Module):
-    r"""
-    A [variant](https://huggingface.co/papers/2002.05202) of the gated linear unit activation function.
-
-    Parameters:
-        dim_in (`int`): The number of channels in the input.
-        dim_out (`int`): The number of channels in the output.
-        bias (`bool`, defaults to True): Whether to use a bias in the linear layer.
-    """
-
-    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
-        super().__init__()
-        self.proj = nn.Linear(dim_in, dim_out * 2, bias=bias)
-
-    def gelu(self, gate: torch.Tensor) -> torch.Tensor:
-        return F.gelu(gate)
-
-    def forward(self, hidden_states, *args, **kwargs):
-        # if len(args) > 0 or kwargs.get("scale", None) is not None:
-        #     deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
-        #     deprecate("scale", "1.0.0", deprecation_message)
-        hidden_states = self.proj(hidden_states)
-        hidden_states, gate = hidden_states.chunk(2, dim=-1)
-        return hidden_states * self.gelu(gate)
-
-
-class ApproximateGELU(nn.Module):
-    r"""
-    The approximate form of the Gaussian Error Linear Unit (GELU). For more details, see section 2 of this
-    [paper](https://huggingface.co/papers/1606.08415).
-
-    Parameters:
-        dim_in (`int`): The number of channels in the input.
-        dim_out (`int`): The number of channels in the output.
-        bias (`bool`, defaults to True): Whether to use a bias in the linear layer.
-    """
-
-    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
-        super().__init__()
-        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
-        return x * torch.sigmoid(1.702 * x)
-
-
-class SwiGLU(nn.Module):
-    r"""
-    A [variant](https://huggingface.co/papers/2002.05202) of the gated linear unit activation function. It's similar to
-    `GEGLU` but uses SiLU / Swish instead of GeLU.
-
-    Parameters:
-        dim_in (`int`): The number of channels in the input.
-        dim_out (`int`): The number of channels in the output.
-        bias (`bool`, defaults to True): Whether to use a bias in the linear layer.
-    """
-
-    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
-        super().__init__()
-
-        self.proj = nn.Linear(dim_in, dim_out * 2, bias=bias)
-        self.activation = nn.SiLU()
-
-    def forward(self, hidden_states):
-        hidden_states = self.proj(hidden_states)
-        hidden_states, gate = hidden_states.chunk(2, dim=-1)
-        return hidden_states * self.activation(gate)
-
-
-class LinearActivation(nn.Module):
-    def __init__(self, dim_in: int, dim_out: int, bias: bool = True, activation: str = "silu"):
-        super().__init__()
-
-        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
-        self.activation = get_activation(activation)
-
-    def forward(self, hidden_states):
-        hidden_states = self.proj(hidden_states)
-        return self.activation(hidden_states)
-
-
 class FeedForward(nn.Module):
     r"""
     A feed-forward layer.
@@ -756,8 +604,9 @@ class FeedForward(nn.Module):
         ])
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.net(hidden_states)
-
+        for layer in self.net:
+            hidden_states = layer(hidden_states)
+        return hidden_states
 
 
 class QwenImageTransformerBlock(nn.Module):
@@ -906,12 +755,7 @@ class AdaLayerNormContinuous(nn.Module):
         super().__init__()
         self.silu = nn.SiLU()
         self.linear = nn.Linear(conditioning_embedding_dim, embedding_dim * 2, bias=bias)
-        if norm_type == "layer_norm":
-            self.norm = nn.LayerNorm(embedding_dim, eps, elementwise_affine, bias)
-        elif norm_type == "rms_norm":
-            self.norm = RMSNorm(embedding_dim, eps, elementwise_affine)
-        else:
-            raise ValueError(f"unknown norm_type {norm_type}")
+        self.norm = nn.LayerNorm(embedding_dim, eps, elementwise_affine, bias)
 
     def forward(self, x: torch.Tensor, conditioning_embedding: torch.Tensor) -> torch.Tensor:
         # convert back to the original dtype in case `conditioning_embedding`` is upcasted to float32 (needed for hunyuanDiT)
@@ -1024,21 +868,6 @@ class QwenImageTransformer2DModel(nn.Module):
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
-        if attention_kwargs is not None:
-            attention_kwargs = attention_kwargs.copy()
-            lora_scale = attention_kwargs.pop("scale", 1.0)
-        else:
-            lora_scale = 1.0
-
-        # if USE_PEFT_BACKEND:
-        #     # weight the lora layers by setting `lora_scale` for each PEFT layer
-        #     scale_lora_layers(self, lora_scale)
-        # else:
-        #     if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
-        #         logger.warning(
-        #             "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
-        #         )
-
         hidden_states = self.img_in(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype)
@@ -1086,9 +915,5 @@ class QwenImageTransformer2DModel(nn.Module):
         # Use only the image part (hidden_states) from the dual-stream blocks
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
-
-        # if USE_PEFT_BACKEND:
-        #     # remove `lora_scale` from each PEFT layer
-        #     unscale_lora_layers(self, lora_scale)
 
         return output
