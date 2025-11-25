@@ -337,10 +337,6 @@ class Attention(nn.Module):
             The dropout probability to use.
         bias (`bool`, *optional*, defaults to False):
             Set to `True` for the query, key, and value linear layers to contain a bias parameter.
-        upcast_attention (`bool`, *optional*, defaults to False):
-            Set to `True` to upcast the attention computation to `float32`.
-        upcast_softmax (`bool`, *optional*, defaults to False):
-            Set to `True` to upcast the softmax computation to `float32`.
         cross_attention_norm (`str`, *optional*, defaults to `None`):
             The type of normalization to use for the cross attention. Can be `None`, `layer_norm`, or `group_norm`.
         cross_attention_norm_num_groups (`int`, *optional*, defaults to 32):
@@ -355,55 +351,30 @@ class Attention(nn.Module):
             Set to `True` to use a bias in the output linear layer.
         scale_qk (`bool`, *optional*, defaults to `True`):
             Set to `True` to scale the query and key by `1 / sqrt(dim_head)`.
-        only_cross_attention (`bool`, *optional*, defaults to `False`):
-            Set to `True` to only use cross attention and not added_kv_proj_dim. Can only be set to `True` if
-            `added_kv_proj_dim` is not `None`.
         eps (`float`, *optional*, defaults to 1e-5):
             An additional value added to the denominator in group normalization that is used for numerical stability.
-        rescale_output_factor (`float`, *optional*, defaults to 1.0):
-            A factor to rescale the output by dividing it with this value.
-        residual_connection (`bool`, *optional*, defaults to `False`):
-            Set to `True` to add the residual connection to the output.
-        _from_deprecated_attn_block (`bool`, *optional*, defaults to `False`):
-            Set to `True` if the attention block is loaded from a deprecated state dict.
-        processor (`AttnProcessor`, *optional*, defaults to `None`):
-            The attention processor to use. If `None`, defaults to `AttnProcessor2_0` if `torch 2.x` is used and
-            `AttnProcessor` otherwise.
     """
 
     def __init__(
         self,
         query_dim: int,
-        cross_attention_dim: Optional[int] = None,
         heads: int = 8,
         dim_head: int = 64,
         dropout: float = 0.0,
-        bias: bool = False,
-        qk_norm: Optional[str] = None,
         added_kv_proj_dim: Optional[int] = None,
-        added_proj_bias: Optional[bool] = True,
-        out_bias: bool = True,
         scale_qk: bool = True,
         eps: float = 1e-5,
         out_dim: int = None,
         out_context_dim: int = None,
-        context_pre_only=None,
         elementwise_affine: bool = True,
-        is_causal: bool = False,
     ):
         super().__init__()
-
         self.inner_dim = out_dim if out_dim is not None else dim_head * heads
         self.inner_kv_dim = self.inner_dim
         self.query_dim = query_dim
-        self.use_bias = bias
-        self.is_cross_attention = cross_attention_dim is not None
-        self.cross_attention_dim = cross_attention_dim if cross_attention_dim is not None else query_dim
         self.dropout = dropout
         self.out_dim = out_dim if out_dim is not None else query_dim
         self.out_context_dim = out_context_dim if out_context_dim is not None else query_dim
-        self.context_pre_only = context_pre_only
-        self.is_causal = is_causal
 
         self.scale_qk = scale_qk
         self.scale = dim_head**-0.5 if self.scale_qk else 1.0
@@ -412,37 +383,27 @@ class Attention(nn.Module):
 
         self.added_kv_proj_dim = added_kv_proj_dim
 
-        if qk_norm == "rms_norm":
-            self.norm_q = RMSNorm(dim_head, eps=eps, elementwise_affine=elementwise_affine)
-            self.norm_k = RMSNorm(dim_head, eps=eps, elementwise_affine=elementwise_affine)
-        else:
-            raise ValueError(
-                f"unknown qk_norm: {qk_norm}. Should be one of None, 'layer_norm', 'fp32_layer_norm', 'layer_norm_across_heads', 'rms_norm', 'rms_norm_across_heads', 'l2'."
-            )
+        # image qkv projs
+        self.norm_q = RMSNorm(dim_head, eps=eps, elementwise_affine=elementwise_affine)
+        self.norm_k = RMSNorm(dim_head, eps=eps, elementwise_affine=elementwise_affine)
 
-        self.to_q = nn.Linear(query_dim, self.inner_dim, bias=bias)
+        self.to_q = nn.Linear(query_dim, self.inner_dim, bias=True)
+        self.to_k = nn.Linear(query_dim, self.inner_kv_dim, bias=True)
+        self.to_v = nn.Linear(query_dim, self.inner_kv_dim, bias=True)
 
-        self.to_k = nn.Linear(self.cross_attention_dim, self.inner_kv_dim, bias=bias)
-        self.to_v = nn.Linear(self.cross_attention_dim, self.inner_kv_dim, bias=bias)
+        # text qkv projs
+        self.norm_added_q = RMSNorm(dim_head, eps=eps)
+        self.norm_added_k = RMSNorm(dim_head, eps=eps)
 
-        self.added_proj_bias = added_proj_bias
-        self.add_k_proj = nn.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=added_proj_bias)
-        self.add_v_proj = nn.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=added_proj_bias)
-        self.add_q_proj = nn.Linear(added_kv_proj_dim, self.inner_dim, bias=added_proj_bias)
+        self.add_k_proj = nn.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=True)
+        self.add_v_proj = nn.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=True)
+        self.add_q_proj = nn.Linear(added_kv_proj_dim, self.inner_dim, bias=True)
 
         self.to_out = nn.ModuleList([])
-        self.to_out.append(nn.Linear(self.inner_dim, self.out_dim, bias=out_bias))
+        self.to_out.append(nn.Linear(self.inner_dim, self.out_dim, bias=True))
         self.to_out.append(nn.Dropout(dropout))
 
-        self.to_add_out = nn.Linear(self.inner_dim, self.out_context_dim, bias=out_bias)
-
-        if qk_norm == "rms_norm":
-            self.norm_added_q = RMSNorm(dim_head, eps=eps)
-            self.norm_added_k = RMSNorm(dim_head, eps=eps)
-        else:
-            raise ValueError(
-                f"unknown qk_norm: {qk_norm}. Should be one of `None,'layer_norm','fp32_layer_norm','rms_norm'`"
-            )
+        self.to_add_out = nn.Linear(self.inner_dim, self.out_context_dim, bias=True)
 
     def forward(
         self,
@@ -627,18 +588,15 @@ class QwenImageTransformerBlock(nn.Module):
         self.img_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.attn = Attention(
             query_dim=dim,
-            cross_attention_dim=None,  # Enable cross attention for joint computation
             added_kv_proj_dim=dim,  # Enable added KV projections for text stream
             dim_head=attention_head_dim,
             heads=num_attention_heads,
             out_dim=dim,
-            context_pre_only=False,
-            bias=True,
             qk_norm=qk_norm,
             eps=eps,
         )
         self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
-        self.img_mlp = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
+        self.img_mlp = FeedForward(dim=dim, dim_out=dim)
 
         # Text processing modules
         self.txt_mod = nn.Sequential(
@@ -648,7 +606,7 @@ class QwenImageTransformerBlock(nn.Module):
         self.txt_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         # Text doesn't need separate attention - it's handled by img_attn joint computation
         self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
-        self.txt_mlp = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
+        self.txt_mlp = FeedForward(dim=dim, dim_out=dim)
 
     def _modulate(self, x, mod_params):
         """Apply modulation to input tensor"""

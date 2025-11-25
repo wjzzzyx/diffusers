@@ -223,7 +223,7 @@ class QwenImageResidualBlock(nn.Module):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
-        self.nonlinearity = get_activation(non_linearity)
+        self.nonlinearity = nn.SiLU()
 
         # layers
         self.norm1 = QwenImageRMS_norm(in_dim, images=False)
