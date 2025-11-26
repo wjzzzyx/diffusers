@@ -645,7 +645,7 @@ class QwenImageDecoder3d(nn.Module):
         return x
 
 
-class AutoencoderKLQwenImage():
+class AutoencoderKLQwenImage(nn.Module):
     def __init__(
         self,
         base_dim: int = 96,

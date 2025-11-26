@@ -362,7 +362,6 @@ class Attention(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.0,
         added_kv_proj_dim: Optional[int] = None,
-        scale_qk: bool = True,
         eps: float = 1e-5,
         out_dim: int = None,
         out_context_dim: int = None,
@@ -375,9 +374,6 @@ class Attention(nn.Module):
         self.dropout = dropout
         self.out_dim = out_dim if out_dim is not None else query_dim
         self.out_context_dim = out_context_dim if out_context_dim is not None else query_dim
-
-        self.scale_qk = scale_qk
-        self.scale = dim_head**-0.5 if self.scale_qk else 1.0
 
         self.heads = out_dim // dim_head if out_dim is not None else heads
 
@@ -410,7 +406,6 @@ class Attention(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states_mask = None,
         image_rotary_emb = None,
     ) -> torch.Tensor:
         r"""
@@ -875,3 +870,143 @@ class QwenImageTransformer2DModel(nn.Module):
         output = self.proj_out(hidden_states)
 
         return output
+
+
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
+
+
+class TrainerQwenImageEdit():
+    def __init__(self, model_config, loss_config, optimizer_config, device):
+        self.device = device
+
+        self.vae = AutoencoderKLQwenImage(**model_config.vae).cuda()
+        self.transformer = QwenImageTransformer2DModel(**model_config.transformer).cuda()
+        self.processor = Qwen2VLProcessor.from_pretrained("Qwen/Qwen-Image-Edit-2509", subfolder="processor")
+        self.scheduler = FlowMatchEulerDiscreteScheduler("Qwen/Qwen-Image-Edit-2509", subfolder="scheduler")
+        self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained("Qwen/Qwen-Image-Edit-2509", subfolder="text_encoder")
+    
+    @torch.no_grad()
+    def predict_step(self, batch, global_step, epoch, batch_idx, logdir):
+        height = batch["height"][0]
+        width = batch["width"][0]
+        assert(height % (self.vae.spatial_compression_ratio * 2) == 0 and width % (self.vae.spatial_compression_ratio * 2) == 0)
+        latent_height = height // self.vae.spatial_compression_ratio
+        latent_width = width // self.vae.spatial_compression_ratio
+
+        batch_size = 1
+        condition_image_sizes = []
+        condition_images = []
+        vae_image_sizes = []
+        vae_images = []
+        for img in batch["image"]:
+            image_width, image_height = img.size
+            condition_width, condition_height = calculate_dimensions(
+                CONDITION_IMAGE_SIZE, image_width / image_height
+            )
+            vae_width, vae_height = calculate_dimensions(VAE_IMAGE_SIZE, image_width / image_height)
+            condition_image_sizes.append((condition_width, condition_height))
+            vae_image_sizes.append((vae_width, vae_height))
+            condition_images.append(img.resize((condition_width, condition_height), resample=Image.LANCZOS))
+            img = img.resize((vae_width, vae_height), resample=Image.LANCZOS)
+            img = np.array(img).astype(float) / 255.0
+            img = torch.from_numpy(img).unsqueeze(0).permute(0, 3, 1, 2) * 2 - 1
+            img = img.unsqueeze(2)
+            vae_images.append(img)
+        
+        do_true_cfg = True
+        prompt_embeds, prompt_embeds_mask = get_qwen_prompt_embeds(batch["prompt"], condition_images)
+        if do_true_cfg:
+            neg_prompt_embeds, neg_prompt_embeds_mask = get_qwen_prompt_embeds(batch["negative_prompt"], condition_images)
+        
+        latents_mean = self.vae.latents_mean.view(1, self.vae.z_dim, 1, 1, 1).to(self.device, prompt_embeds.dtype)
+        latents_std = self.vae.latents_std.view(1, self.vae.z_dim, 1, 1, 1).to(self.device, prompt_embeds.dtype)
+
+        ref_image_latents = list()
+        for image in vae_images:
+            image_latent = self.vae.encode(image).mode().squeeze(2)    # squeeze frame dimension
+            image_latent = (image_latent - latents_mean) / latents_std
+            image_latent = image_latent.view(batch_size, image_latent.size(1), image_latent.size(2) // 2, 2, image_latent.size(3) // 2, 2)
+            image_latent = image_latent.permute(0, 2, 4, 1, 3, 5)
+            image_latent = image_latent.reshape(batch_size, image_latent.size(1) * image_latent.size(2), image_latent.size(3) * 4)
+            ref_image_latents.append(image_latent)
+        ref_image_latents = torch.cat(ref_image_latents, dim=1)
+
+        latents = torch.randn(
+            (batch_size, self.vae.z_dim, latent_height, latent_width),
+            device=self.device, dtype=prompt_embeds.dtype, generator=None
+        )
+        latents = latents.view(batch_size, self.vae.z_dim, latent_height // 2, 2, latent_width // 2, 2)
+        latents = latents.permute(0, 2, 4, 1, 3, 5)
+        latents = latents.reshape(batch_size, latents.size(1) * latents.size(2), latents.size(3) * 4)
+
+        img_shapes = [(1, latent_height // 2, latent_width // 2)]
+        for vae_width, vae_height in vae_image_sizes:
+            img_shapes.append((1, vae_height // self.vae.spatial_compression_ratio // 2, vae_width // self.vae.spatial_compression_ratio // 2))
+        
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_infernece_steps)
+        image_seq_len = latents.size(1)
+        mu = calculate_shift(
+            image_seq_len,
+            self.scheduler.config.get("base_image_seq_len", 256),
+            self.scheduler.config.get("max_image_seq_len", 4096),
+            self.scheduler.config.get("base_shift", 0.5),
+            self.scheduler.config.get("max_shift", 1.15)
+        )
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            sigmas=sigmas,
+            mu=mu
+        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+        neg_txt_seq_lens = neg_prompt_embeds_mask.sum(dim=1).tolist()
+
+        self.scheduler.set_begin_index(0)
+
+        for i, t in enumerate(timesteps):
+            latent_model_input = torch.cat([latents, ref_image_latents], dim=1)
+            timestep = t.expand(batch_size).to(latents.dtype)
+            noise_pred = self.transformer(
+                hidden_states=latent_model_input,
+                timestep = timestep / 1000,
+                guidance=None,
+                encoder_hidden_states_mask=prompt_embeds_mask,
+                encoder_hidden_states=prompt_embeds,
+                img_shapes=img_shapes,
+                txt_seq_lens=txt_seq_lens,
+                attention_kwargs={}
+            )
+            noise_pred = noise_pred[:, :latents.size(1)]
+
+            if do_true_cfg:
+                neg_noise_pred = self.transformer(
+                    hidden_states=latent_model_input,
+                    timestep = timestep / 1000,
+                    guidance=None,
+                    encoder_hidden_states_mask=neg_prompt_embeds_mask,
+                    encoder_hidden_states=neg_prompt_embeds,
+                    img_shapes=img_shapes,
+                    txt_seq_lens=neg_txt_seq_lens,
+                    attention_kwargs={}
+                )
+                neg_noise_pred = neg_noise_pred[:, :latents.size(1)]
+                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                
+                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                noise_pred = comb_pred * (cond_norm / noise_norm)
+            
+            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+        
+        latents = latents.view(batch_size, latent_height // 2, latent_width // 2, latents.size(-1) // 4, 2, 2)
+        latents = latents.permute(0, 3, 1, 4, 2, 5)
+        latents = latents.reshape(batch_size, latents.size(1), 1, latent_height, latent_width)
+        latents = latents * latents_std + latents_mean
+        image = self.vae.decode(latents).squeeze(2)
+        image = torch.clamp((image + 1) / 2, 0, 1)
+        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
+        image = (image * 255).astype("uint8")
+        image = Image.fromarray(image[0])
+        return image
