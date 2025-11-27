@@ -304,7 +304,7 @@ class Flux(nn.Module):
         super().__init__()
         self.config = config
         self.in_channels = config.in_channels
-        self.out_channels = self.in_channels
+        self.out_channels = config.out_channels
         if config.hidden_size % config.num_heads != 0:
             raise ValueError(
                 f"Hidden size {config.hidden_size} must be divisible by num_heads {config.num_heads}"
@@ -523,22 +523,28 @@ def sample_training_timestep(sampling_method, batch_size, device, sigmoid_scale 
 def sample_inference_timestep(
     num_steps: int,
     image_seq_len: int,
+    base_seq_len: int = 256,
+    max_seq_len: int = 4096,
     base_shift: float = 0.5,
     max_shift: float = 1.15,
     shift: bool = True,
+    shift_terminal: float = 0.0
 ) -> list[float]:
     # extra step for zero
     timesteps = torch.linspace(1, 0, num_steps + 1)
 
     # shifting the schedule to favor high timesteps for higher signal images
     if shift:
-        x1 = 256
-        x2 = 4096
-        m = (max_shift - base_shift) / (x2 - x1)
-        b = base_shift - m * x1
+        m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+        b = base_shift - m * base_seq_len
         mu = m * image_seq_len + b
 
         timesteps = math.exp(mu) / (math.exp(mu) + (1 / timesteps - 1) ** 1.0)
+    
+    if shift_terminal:
+        one_minus_t = 1 - timesteps[:-1]
+        scale_factor = one_minus_t[-1] / (1 - shift_terminal)
+        timesteps = torch.cat([1 - (one_minus_t / scale_factor), timesteps[-1:]])
     
     return timesteps.tolist()
 
