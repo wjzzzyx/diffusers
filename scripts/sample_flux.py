@@ -4,7 +4,8 @@ from omegaconf import OmegaConf
 from PIL import Image
 import torch
 
-from diffusers.model.flux import FluxModel, sample_inference_timestep, forward_text_model
+from diffusers.model.flux import FluxModel, forward_text_model
+from diffusers.sampler.sample_flow_match import sample_inference_timestep
 
 
 seed = 42

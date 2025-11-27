@@ -9,8 +9,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 
-from diffusers.model.flux import AutoEncoder, Flux, sample_training_timestep, sample_inference_timestep
+from diffusers.model.flux import AutoEncoder, Flux
 from diffusers.model.lora import LoRAMLP, LoRAConv
+from diffusers.sampler.sample_flow_match import sample_training_timestep, sample_inference_timestep
 import torch_utils
 import utils
 
