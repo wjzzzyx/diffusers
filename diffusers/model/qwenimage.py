@@ -362,7 +362,6 @@ class Attention(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.0,
         added_kv_proj_dim: Optional[int] = None,
-        eps: float = 1e-5,
         out_dim: int = None,
         out_context_dim: int = None,
         elementwise_affine: bool = True,
@@ -380,16 +379,16 @@ class Attention(nn.Module):
         self.added_kv_proj_dim = added_kv_proj_dim
 
         # image qkv projs
-        self.norm_q = RMSNorm(dim_head, eps=eps, elementwise_affine=elementwise_affine)
-        self.norm_k = RMSNorm(dim_head, eps=eps, elementwise_affine=elementwise_affine)
+        self.norm_q = RMSNorm(dim_head, eps=1e-6, elementwise_affine=elementwise_affine)
+        self.norm_k = RMSNorm(dim_head, eps=1e-6, elementwise_affine=elementwise_affine)
 
         self.to_q = nn.Linear(query_dim, self.inner_dim, bias=True)
         self.to_k = nn.Linear(query_dim, self.inner_kv_dim, bias=True)
         self.to_v = nn.Linear(query_dim, self.inner_kv_dim, bias=True)
 
         # text qkv projs
-        self.norm_added_q = RMSNorm(dim_head, eps=eps)
-        self.norm_added_k = RMSNorm(dim_head, eps=eps)
+        self.norm_added_q = RMSNorm(dim_head, eps=1e-6)
+        self.norm_added_k = RMSNorm(dim_head, eps=1e-6)
 
         self.add_k_proj = nn.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=True)
         self.add_v_proj = nn.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=True)
@@ -418,8 +417,6 @@ class Attention(nn.Module):
                 The hidden states of the encoder.
             attention_mask (`torch.Tensor`, *optional*):
                 The attention mask to use. If `None`, no mask is applied.
-            **cross_attention_kwargs:
-                Additional keyword arguments to pass along to the cross attention.
 
         Returns:
             `torch.Tensor`: The output of the attention layer.
@@ -567,7 +564,7 @@ class FeedForward(nn.Module):
 
 class QwenImageTransformerBlock(nn.Module):
     def __init__(
-        self, dim: int, num_attention_heads: int, attention_head_dim: int, qk_norm: str = "rms_norm", eps: float = 1e-6
+        self, dim: int, num_attention_heads: int, attention_head_dim: int
     ):
         super().__init__()
 
@@ -580,17 +577,15 @@ class QwenImageTransformerBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, 6 * dim, bias=True),  # For scale, shift, gate for norm1 and norm2
         )
-        self.img_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.img_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(
             query_dim=dim,
             added_kv_proj_dim=dim,  # Enable added KV projections for text stream
             dim_head=attention_head_dim,
             heads=num_attention_heads,
             out_dim=dim,
-            qk_norm=qk_norm,
-            eps=eps,
         )
-        self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.img_mlp = FeedForward(dim=dim, dim_out=dim)
 
         # Text processing modules
@@ -598,9 +593,9 @@ class QwenImageTransformerBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, 6 * dim, bias=True),  # For scale, shift, gate for norm1 and norm2
         )
-        self.txt_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.txt_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         # Text doesn't need separate attention - it's handled by img_attn joint computation
-        self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.txt_mlp = FeedForward(dim=dim, dim_out=dim)
 
     def _modulate(self, x, mod_params):
@@ -615,7 +610,6 @@ class QwenImageTransformerBlock(nn.Module):
         encoder_hidden_states_mask: torch.Tensor,
         temb: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get modulation parameters for both streams
         img_mod_params = self.img_mod(temb)  # [B, 6*dim]
@@ -643,9 +637,7 @@ class QwenImageTransformerBlock(nn.Module):
         attn_output = self.attn(
             hidden_states=img_modulated,  # Image stream (will be processed as "sample")
             encoder_hidden_states=txt_modulated,  # Text stream (will be processed as "context")
-            encoder_hidden_states_mask=encoder_hidden_states_mask,
             image_rotary_emb=image_rotary_emb,
-            **joint_attention_kwargs,
         )
 
         # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
@@ -701,14 +693,12 @@ class AdaLayerNormContinuous(nn.Module):
         # However, this is how it was implemented in the original code, and it's rather likely you should
         # set `elementwise_affine` to False.
         elementwise_affine=True,
-        eps=1e-5,
         bias=True,
-        norm_type="layer_norm",
     ):
         super().__init__()
         self.silu = nn.SiLU()
         self.linear = nn.Linear(conditioning_embedding_dim, embedding_dim * 2, bias=bias)
-        self.norm = nn.LayerNorm(embedding_dim, eps, elementwise_affine, bias)
+        self.norm = nn.LayerNorm(embedding_dim, 1e-6, elementwise_affine, bias)
 
     def forward(self, x: torch.Tensor, conditioning_embedding: torch.Tensor) -> torch.Tensor:
         # convert back to the original dtype in case `conditioning_embedding`` is upcasted to float32 (needed for hunyuanDiT)
@@ -780,7 +770,7 @@ class QwenImageTransformer2DModel(nn.Module):
             ]
         )
 
-        self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
+        self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False)
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
 
         self.gradient_checkpointing = False
@@ -794,7 +784,6 @@ class QwenImageTransformer2DModel(nn.Module):
         img_shapes: Optional[List[Tuple[int, int, int]]] = None,
         txt_seq_lens: Optional[List[int]] = None,
         guidance: torch.Tensor = None,  # TODO: this should probably be removed
-        attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_block_samples=None,
     ) -> torch.Tensor:
         """
@@ -809,13 +798,6 @@ class QwenImageTransformer2DModel(nn.Module):
                 Mask of the input conditions.
             timestep ( `torch.LongTensor`):
                 Used to indicate denoising step.
-            attention_kwargs (`dict`, *optional*):
-                A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
-                `self.processor` in
-                [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~models.transformer_2d.Transformer2DModelOutput`] instead of a plain
-                tuple.
 
         Returns:
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
@@ -856,7 +838,6 @@ class QwenImageTransformer2DModel(nn.Module):
                     encoder_hidden_states_mask=encoder_hidden_states_mask,
                     temb=temb,
                     image_rotary_emb=image_rotary_emb,
-                    joint_attention_kwargs=attention_kwargs,
                 )
 
             # controlnet residual
