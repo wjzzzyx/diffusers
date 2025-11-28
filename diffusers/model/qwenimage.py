@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffusers.sampler.sample_flow_match import sample_inference_timestep
+
 
 class QwenEmbedRope(nn.Module):
     def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
@@ -853,26 +855,89 @@ class QwenImageTransformer2DModel(nn.Module):
         return output
 
 
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
+from PIL import Image
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2VLProcessor
+from qwenimage_vae import AutoencoderKLQwenImage
+
+
+def get_qwen_prompt_embeds(processor, text_encoder, prompt: List[str], image: List[Image] = None):
+    img_prompt_template = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
+    base_img_prompt = ""
+    for i, img in enumerate(image):
+        base_img_prompt += img_prompt_template.format(i + 1)
+
+    template = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+
+    drop_idx = 64
+    txt = [template.format(base_img_prompt + e) for e in prompt]
+
+    model_inputs = processor(
+        text=txt,
+        images=image,
+        padding=True,
+        return_tensors="pt",
+    ).to(text_encoder.device)
+
+    outputs = text_encoder(
+        input_ids=model_inputs.input_ids,
+        attention_mask=model_inputs.attention_mask,
+        pixel_values=model_inputs.pixel_values,
+        image_grid_thw=model_inputs.image_grid_thw,
+        output_hidden_states=True,
+    )
+
+    hidden_states = outputs.hidden_states[-1]
+    bool_mask = model_inputs.attention_mask.bool()
+    valid_lengths = bool_mask.sum(dim=1)
+    selected = hidden_states[bool_mask]
+    split_hidden_states = torch.split(selected, valid_lengths.tolist(), dim=0)
+    
+    split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+    attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
+    max_seq_len = max([e.size(0) for e in split_hidden_states])
+    prompt_embeds = torch.stack(
+        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
+    )
+    encoder_attention_mask = torch.stack(
+        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
+    )
+
+    return prompt_embeds, encoder_attention_mask
+
+
+def calculate_dimensions(target_area, ratio):
+    width = math.sqrt(target_area * ratio)
+    height = width / ratio
+
+    width = round(width / 32) * 32
+    height = round(height / 32) * 32
+
+    return width, height
 
 
 class TrainerQwenImageEdit():
-    def __init__(self, model_config, loss_config, optimizer_config, device):
+    def __init__(self, model_config, loss_config, optimizer_config, sampler_config, device):
+        self.model_config = model_config
+        self.loss_config = loss_config
+        self.optimizer_config = optimizer_config
+        self.sampler_config = sampler_config
         self.device = device
 
         self.vae = AutoencoderKLQwenImage(**model_config.vae).cuda()
         self.transformer = QwenImageTransformer2DModel(**model_config.transformer).cuda()
         self.processor = Qwen2VLProcessor.from_pretrained("Qwen/Qwen-Image-Edit-2509", subfolder="processor")
-        self.scheduler = FlowMatchEulerDiscreteScheduler("Qwen/Qwen-Image-Edit-2509", subfolder="scheduler")
         self.text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained("Qwen/Qwen-Image-Edit-2509", subfolder="text_encoder")
     
     @torch.no_grad()
     def predict_step(self, batch, global_step, epoch, batch_idx, logdir):
+        CONDITION_IMAGE_SIZE = 384 * 384
+        VAE_IMAGE_SIZE = 1024 * 1024
         height = batch["height"][0]
         width = batch["width"][0]
         assert(height % (self.vae.spatial_compression_ratio * 2) == 0 and width % (self.vae.spatial_compression_ratio * 2) == 0)
         latent_height = height // self.vae.spatial_compression_ratio
         latent_width = width // self.vae.spatial_compression_ratio
+        true_cfg_scale = batch["true_cfg_scale"][0]
 
         batch_size = 1
         condition_image_sizes = []
@@ -895,9 +960,13 @@ class TrainerQwenImageEdit():
             vae_images.append(img)
         
         do_true_cfg = True
-        prompt_embeds, prompt_embeds_mask = get_qwen_prompt_embeds(batch["prompt"], condition_images)
+        prompt_embeds, prompt_embeds_mask = get_qwen_prompt_embeds(
+            self.processor, self.text_encoder, batch["prompt"], condition_images
+        )
         if do_true_cfg:
-            neg_prompt_embeds, neg_prompt_embeds_mask = get_qwen_prompt_embeds(batch["negative_prompt"], condition_images)
+            neg_prompt_embeds, neg_prompt_embeds_mask = get_qwen_prompt_embeds(
+                self.processor, self.text_encoder, batch["negative_prompt"], condition_images
+            )
         
         latents_mean = self.vae.latents_mean.view(1, self.vae.z_dim, 1, 1, 1).to(self.device, prompt_embeds.dtype)
         latents_std = self.vae.latents_std.view(1, self.vae.z_dim, 1, 1, 1).to(self.device, prompt_embeds.dtype)
@@ -924,34 +993,27 @@ class TrainerQwenImageEdit():
         for vae_width, vae_height in vae_image_sizes:
             img_shapes.append((1, vae_height // self.vae.spatial_compression_ratio // 2, vae_width // self.vae.spatial_compression_ratio // 2))
         
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_infernece_steps)
         image_seq_len = latents.size(1)
-        mu = calculate_shift(
+        timesteps = sample_inference_timestep(
+            self.sampler_config.num_inference_timesteps,
             image_seq_len,
-            self.scheduler.config.get("base_image_seq_len", 256),
-            self.scheduler.config.get("max_image_seq_len", 4096),
-            self.scheduler.config.get("base_shift", 0.5),
-            self.scheduler.config.get("max_shift", 1.15)
+            self.sampler_config.base_seq_len,
+            self.sampler_config.max_seq_len,
+            self.sampler_config.base_shift,
+            self.sampler_config.max_shift,
+            shift=True,
+            shift_terminal=0.02
         )
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler,
-            num_inference_steps,
-            sigmas=sigmas,
-            mu=mu
-        )
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
         neg_txt_seq_lens = neg_prompt_embeds_mask.sum(dim=1).tolist()
 
-        self.scheduler.set_begin_index(0)
-
-        for i, t in enumerate(timesteps):
+        for t, tm1 in zip(timesteps[:-1], timesteps[1:]):
             latent_model_input = torch.cat([latents, ref_image_latents], dim=1)
-            timestep = t.expand(batch_size).to(latents.dtype)
+            timestep = torch.full((batch_size,), t, device=latents.device, dtype=latents.dtype)
             noise_pred = self.transformer(
                 hidden_states=latent_model_input,
-                timestep = timestep / 1000,
+                timestep = timestep,
                 guidance=None,
                 encoder_hidden_states_mask=prompt_embeds_mask,
                 encoder_hidden_states=prompt_embeds,
@@ -964,7 +1026,7 @@ class TrainerQwenImageEdit():
             if do_true_cfg:
                 neg_noise_pred = self.transformer(
                     hidden_states=latent_model_input,
-                    timestep = timestep / 1000,
+                    timestep = timestep,
                     guidance=None,
                     encoder_hidden_states_mask=neg_prompt_embeds_mask,
                     encoder_hidden_states=neg_prompt_embeds,
@@ -979,7 +1041,7 @@ class TrainerQwenImageEdit():
                 noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
                 noise_pred = comb_pred * (cond_norm / noise_norm)
             
-            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            latents = latents + (tm1 - t) * noise_pred
         
         latents = latents.view(batch_size, latent_height // 2, latent_width // 2, latents.size(-1) // 4, 2, 2)
         latents = latents.permute(0, 3, 1, 4, 2, 5)
