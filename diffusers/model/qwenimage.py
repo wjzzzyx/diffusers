@@ -8,8 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from diffusers.sampler.sample_flow_match import sample_inference_timestep
-
 
 class QwenEmbedRope(nn.Module):
     def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
@@ -857,7 +855,8 @@ class QwenImageTransformer2DModel(nn.Module):
 
 from PIL import Image
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2VLProcessor
-from qwenimage_vae import AutoencoderKLQwenImage
+from diffusers.model.qwenimage_vae import AutoencoderKLQwenImage
+from diffusers.sampler.sample_flow_match import sample_inference_timestep
 
 
 def get_qwen_prompt_embeds(processor, text_encoder, prompt: List[str], image: List[Image] = None):
@@ -968,8 +967,8 @@ class TrainerQwenImageEdit():
                 self.processor, self.text_encoder, batch["negative_prompt"], condition_images
             )
         
-        latents_mean = self.vae.latents_mean.view(1, self.vae.z_dim, 1, 1, 1).to(self.device, prompt_embeds.dtype)
-        latents_std = self.vae.latents_std.view(1, self.vae.z_dim, 1, 1, 1).to(self.device, prompt_embeds.dtype)
+        latents_mean = self.vae.latents_mean.view(1, self.vae.z_dim, 1, 1).to(self.device, prompt_embeds.dtype)
+        latents_std = self.vae.latents_std.view(1, self.vae.z_dim, 1, 1).to(self.device, prompt_embeds.dtype)
 
         ref_image_latents = list()
         for image in vae_images:
@@ -992,7 +991,8 @@ class TrainerQwenImageEdit():
         img_shapes = [(1, latent_height // 2, latent_width // 2)]
         for vae_width, vae_height in vae_image_sizes:
             img_shapes.append((1, vae_height // self.vae.spatial_compression_ratio // 2, vae_width // self.vae.spatial_compression_ratio // 2))
-        
+        img_shapes = [img_shapes]
+
         image_seq_len = latents.size(1)
         timesteps = sample_inference_timestep(
             self.sampler_config.num_inference_timesteps,
@@ -1045,9 +1045,9 @@ class TrainerQwenImageEdit():
         
         latents = latents.view(batch_size, latent_height // 2, latent_width // 2, latents.size(-1) // 4, 2, 2)
         latents = latents.permute(0, 3, 1, 4, 2, 5)
-        latents = latents.reshape(batch_size, latents.size(1), 1, latent_height, latent_width)
+        latents = latents.reshape(batch_size, latents.size(1), latent_height, latent_width)
         latents = latents * latents_std + latents_mean
-        image = self.vae.decode(latents).squeeze(2)
+        image = self.vae.decode(latents.unsqueeze(2)).squeeze(2)
         image = torch.clamp((image + 1) / 2, 0, 1)
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         image = (image * 255).astype("uint8")
